@@ -1,0 +1,115 @@
+{
+  "name": "イレルタLV50",
+  "serial": "192.168.0.119:35103",
+  "rotation": 3,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260417_232856_621752.png"
+    },
+    {
+      "type": "tap",
+      "x": 2548,
+      "y": 95,
+      "duration_ms": 131
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.177
+    },
+    {
+      "type": "tap",
+      "x": 2385,
+      "y": 377,
+      "duration_ms": 158
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.705
+    },
+    {
+      "type": "tap",
+      "x": 352,
+      "y": 602,
+      "duration_ms": 125
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.539
+    },
+    {
+      "type": "tap",
+      "x": 2424,
+      "y": 1126,
+      "duration_ms": 108
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.933
+    },
+    {
+      "type": "tap",
+      "x": 1604,
+      "y": 829,
+      "duration_ms": 106
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 6.425
+    },
+    {
+      "type": "tap",
+      "x": 351,
+      "y": 315,
+      "duration_ms": 136
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.625
+    },
+    {
+      "type": "tap",
+      "x": 2376,
+      "y": 878,
+      "duration_ms": 99
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 0.633
+    },
+    {
+      "type": "tap",
+      "x": 2549,
+      "y": 869,
+      "duration_ms": 120
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 0.692
+    },
+    {
+      "type": "tap",
+      "x": 1640,
+      "y": 822,
+      "duration_ms": 73
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.256
+    },
+    {
+      "type": "tap",
+      "x": 2550,
+      "y": 809,
+      "duration_ms": 125
+    }
+  ]
+}

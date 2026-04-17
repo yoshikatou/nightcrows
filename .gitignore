@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+debug/
+recordings/
+settings.json
