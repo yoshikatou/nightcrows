@@ -11,7 +11,7 @@ SETTINGS_PATH = "settings.json"
 @dataclass
 class Device:
     label: str
-    serial: str
+    ip: str
 
 
 @dataclass
@@ -21,9 +21,30 @@ class AppSettings:
 
 def _default_settings() -> AppSettings:
     return AppSettings(devices=[
-        Device(label="オフィス", serial="192.168.255.57:34497"),
-        Device(label="自宅",     serial="192.168.0.119:35103"),
+        Device(label="オフィス", ip="192.168.255.57"),
+        Device(label="自宅",     ip="192.168.0.119"),
     ])
+
+
+def _parse_device(d: dict) -> Device | None:
+    """新旧全フォーマットに対応:
+    - 最新: {"label", "ip"}
+    - 旧A : {"label", "ip", "port"}              → port を捨てる
+    - 旧B : {"label", "serial": "IP:PORT"}       → IP だけ取り出す
+    """
+    label = d.get("label", "").strip()
+    if not label:
+        return None
+    if "ip" in d:
+        ip = str(d["ip"]).strip()
+    elif "serial" in d:
+        s = str(d["serial"]).strip()
+        ip = s.rsplit(":", 1)[0] if ":" in s else s
+    else:
+        return None
+    if not ip:
+        return None
+    return Device(label=label, ip=ip)
 
 
 def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
@@ -33,13 +54,16 @@ def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
         return s
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    devices = [Device(label=d["label"], serial=d["serial"])
-               for d in data.get("devices", [])]
+    devices: list[Device] = []
+    for d in data.get("devices", []):
+        dev = _parse_device(d)
+        if dev:
+            devices.append(dev)
     return AppSettings(devices=devices)
 
 
 def save_settings(s: AppSettings, path: str = SETTINGS_PATH) -> None:
-    data = {"devices": [{"label": d.label, "serial": d.serial} for d in s.devices]}
+    data = {"devices": [{"label": d.label, "ip": d.ip} for d in s.devices]}
     out_dir = os.path.dirname(path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)

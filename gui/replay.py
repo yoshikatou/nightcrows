@@ -1,6 +1,7 @@
 """シーンの再生エンジン。"""
 from __future__ import annotations
 
+import random
 import time
 from typing import Callable
 
@@ -32,6 +33,8 @@ def replay_scene(scene: Scene, serial: str,
             p = step.params
             input_swipe(serial, p["x1"], p["y1"], p["x2"], p["y2"],
                         int(p.get("duration_ms", 500)))
+        elif step.type == "scroll":
+            _do_scroll(serial, step, log)
         elif step.type == "wait_fixed":
             _interruptible_sleep(float(step.params.get("seconds", 1.0)), should_stop)
         elif step.type == "wait_image":
@@ -44,6 +47,24 @@ def replay_scene(scene: Scene, serial: str,
         else:
             log(f"未知のステップ型: {step.type}")
     log("完了")
+
+
+def _jitter(base: int, jitter: int) -> int:
+    if jitter <= 0:
+        return base
+    return base + random.randint(-jitter, jitter)
+
+
+def _do_scroll(serial: str, step: Step, log: LogFn) -> None:
+    p = step.params
+    x1 = _jitter(int(p["x1"]), int(p.get("x1_jitter", 0)))
+    y1 = _jitter(int(p["y1"]), int(p.get("y1_jitter", 0)))
+    x2 = _jitter(int(p["x2"]), int(p.get("x2_jitter", 0)))
+    y2 = _jitter(int(p["y2"]), int(p.get("y2_jitter", 0)))
+    dur = max(100, _jitter(int(p.get("duration_ms", 10000)),
+                           int(p.get("duration_jitter_ms", 0))))
+    log(f"  scroll jittered: ({x1},{y1})->({x2},{y2}) {dur}ms")
+    input_swipe(serial, x1, y1, x2, y2, dur)
 
 
 def _interruptible_sleep(seconds: float, should_stop: StopFn) -> None:

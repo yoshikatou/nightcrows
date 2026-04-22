@@ -15,17 +15,24 @@ class Step:
 @dataclass
 class Scene:
     name: str = "untitled"
-    serial: str = ""
+    device_ip: str = ""
     rotation: int = 0
     phys_size: tuple[int, int] = (1220, 2712)
     logical_size: tuple[int, int] = (1220, 2712)
     steps: list[Step] = field(default_factory=list)
 
 
+def _extract_ip(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    return raw.rsplit(":", 1)[0] if ":" in raw else raw
+
+
 def save_scene(scene: Scene, path: str) -> None:
     data = {
         "name": scene.name,
-        "serial": scene.serial,
+        "device_ip": scene.device_ip,
         "rotation": scene.rotation,
         "phys_size": list(scene.phys_size),
         "logical_size": list(scene.logical_size),
@@ -46,9 +53,13 @@ def load_scene(path: str) -> Scene:
         s = dict(s)
         t = s.pop("type")
         steps.append(Step(type=t, params=s))
+    if "device_ip" in data:
+        device_ip = str(data.get("device_ip") or "").strip()
+    else:
+        device_ip = _extract_ip(str(data.get("serial") or ""))
     return Scene(
         name=data.get("name", "untitled"),
-        serial=data.get("serial", ""),
+        device_ip=device_ip,
         rotation=data.get("rotation", 0),
         phys_size=tuple(data.get("phys_size", [1220, 2712])),
         logical_size=tuple(data.get("logical_size", [1220, 2712])),

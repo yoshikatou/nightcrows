@@ -1,0 +1,27 @@
+{
+  "name": "激戦地2",
+  "serial": "192.168.0.119",
+  "rotation": 3,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260422_220921_264403.png"
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260422_220931_460886.png"
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260422_220942_423683.png"
+    }
+  ]
+}

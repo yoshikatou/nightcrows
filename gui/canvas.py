@@ -21,7 +21,7 @@ class SnapshotCanvas(QLabel):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(400, 300)
-        self.setStyleSheet("background-color: #202020; color: #888;")
+        self.setStyleSheet("background-color: #202020; color: #ffffff;")
         self.setText("スナップショット未取得")
 
         self._orig_pixmap: QPixmap | None = None
