@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .adb import adb_disconnect, discover_and_connect
+from .runner_widget import RunnerWidget
 from .scene_editor import SceneEditorWidget
 from .settings import AppSettings, load_settings, save_settings
 from .settings_dialog import DeviceSettingsDialog
@@ -66,9 +67,10 @@ class MainWindow(QMainWindow):
         # タブ
         self.tabs = QTabWidget()
         self.scene_editor = SceneEditorWidget(self)
+        self.runner = RunnerWidget(self)
         self.tabs.addTab(self.scene_editor, "シーン編集")
         self.tabs.addTab(self._build_flow_placeholder(), "フロー編集")
-        self.tabs.addTab(self._build_runner_placeholder(), "ランナー")
+        self.tabs.addTab(self.runner, "ランナー")
         root.addWidget(self.tabs, 1)
 
         self.setCentralWidget(central)
@@ -77,15 +79,6 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         label = QLabel("フロー編集（未実装）\n\n複数シーンの繋ぎ方・時刻スケジュール・監視ルールを編集するタブ")
-        label.setStyleSheet("padding: 40px;")
-        lay.addWidget(label)
-        lay.addStretch(1)
-        return w
-
-    def _build_runner_placeholder(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        label = QLabel("ランナー（未実装）\n\nフローを実行してステータスを表示するタブ")
         label.setStyleSheet("padding: 40px;")
         lay.addWidget(label)
         lay.addStretch(1)
@@ -198,6 +191,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ shutdown
     def closeEvent(self, event):
         self.scene_editor.shutdown()
+        self.runner.shutdown()
         super().closeEvent(event)
 
 

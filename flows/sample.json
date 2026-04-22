@@ -1,0 +1,14 @@
+{
+  "name": "sample",
+  "version": 1,
+  "device_ip": "192.168.0.119",
+  "main_sequence": [
+    "激戦地2.json"
+  ],
+  "after_main": "stay",
+  "schedule": [],
+  "watchers": [],
+  "settings": {
+    "polling_interval_s": 1.0
+  }
+}

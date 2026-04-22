@@ -158,9 +158,14 @@ templates/
 - [x] データモデル（`gui/flow.py`、`gui/scene.py`）
 - [x] フォルダ構成
 - [x] GUI タブ化（シーン編集タブはフル機能）
-- [ ] 再生エンジン拡張（`gui/replay.py` に watcher ポーリング + schedule + 割り込み）
-- [ ] フロー編集タブ
-- [ ] ランナータブ（再生ステータス表示、手動トリガ）
-- [ ] OCR 実装（数字テンプレマッチ）
+- [x] 再生エンジン（`gui/flow_runner.py`）— main_sequence 順次、`after_main`, step_end 割り込み
+- [x] スケジュールトリガ（時刻で別シーンにジャンプ）
+- [x] ウォッチャー — `image_appear` + 優先度 + クールダウン + ハンドラ中の pause
+- [x] ウォッチャー — `image_gone`（N回連続外れ判定）
+- [x] ウォッチャー — `digit_threshold`（0.png〜9.png でテンプレマッチして数値比較）
+- [x] ランナータブ（最小：フロー選択、開始/停止、ログ）
+- [ ] 割り込みモード `interrupt: "immediate"`（現状は `step_end` のみ）
+- [ ] フロー編集タブ（JSON 手書き不要化）
+- [ ] ランナータブ拡張（現在シーン表示、watcher ステータス、手動トリガ）
 - [ ] 領域指定ダイアログ（スナップ上でドラッグして region を決める）
 - [ ] ランナー分離ウィンドウ化
