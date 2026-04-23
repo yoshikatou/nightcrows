@@ -18,7 +18,8 @@ from typing import Any
 class ScheduleEntry:
     time: str = "00:00"              # "HH:MM"
     target: str = ""                 # scenes/ からの相対パス
-    repeat: str = "daily"            # "daily" | "once"
+    repeat: str = "daily"            # "daily" | "weekly" | "once"
+    days: list[int] = field(default_factory=list)  # 0=月〜6=日  repeat="weekly" のとき使用
     date: str = ""                   # "YYYY-MM-DD"  repeat="once" のとき使用
 
 
@@ -132,6 +133,8 @@ def _schedule_to_dict(s: ScheduleEntry) -> dict[str, Any]:
         "target": s.target,
         "repeat": s.repeat,
     }
+    if s.repeat == "weekly" and s.days:
+        d["days"] = list(s.days)
     if s.repeat == "once" and s.date:
         d["date"] = s.date
     return d
@@ -142,6 +145,7 @@ def _schedule_from_dict(d: dict[str, Any]) -> ScheduleEntry:
         time=d.get("time", "00:00"),
         target=d.get("target", ""),
         repeat=d.get("repeat", "daily"),
+        days=list(d.get("days", []) or []),
         date=d.get("date", ""),
     )
 

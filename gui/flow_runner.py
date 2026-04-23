@@ -52,12 +52,17 @@ def _check_schedule(
     today_str = today.isoformat()
     current_hm = now.strftime("%H:%M")
 
+    today_weekday = now.weekday()  # 0=月〜6=日
+
     candidates: list[tuple[str, int, ScheduleEntry]] = []
     for idx, entry in enumerate(flow.schedule):
         if entry.time > current_hm:
             continue
         if entry.repeat == "once":
             if entry.date != today_str:
+                continue
+        elif entry.repeat == "weekly":
+            if entry.days and today_weekday not in entry.days:
                 continue
         if last_fired.get(idx) == today:
             continue

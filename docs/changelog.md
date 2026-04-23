@@ -11,6 +11,13 @@
 - Python 3.10 環境に `.venv/` を作成し、`requirements.txt` 依存をインストール
 - `numpy>=2.4` が Python 3.10 では存在しないため `numpy>=1.26` に緩和（numpy 2.2.6 が入る）
 
+### スケジュール：曜日指定対応
+
+- `ScheduleEntry` に `repeat: "weekly"` と `days: list[int]` を追加（0=月〜6=日）
+- `flow_runner._check_schedule` に曜日フィルタを追加。`today_weekday not in entry.days` の場合はスキップ
+- `days` 省略または空リストの場合は毎日発火（`daily` と同じ動作）
+- `flow_design.md` のスキーマ・決定事項・サンプル JSON を更新
+
 ### GUI 編集機能の強化
 
 #### キャンバス：マーカードラッグ移動
