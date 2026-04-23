@@ -17,6 +17,7 @@ from .flow_editor import FlowEditorWidget
 from .maintenance_dialog import MaintenanceDialog
 from .runner_widget import RunnerWidget
 from .scene_editor import SceneEditorWidget
+from .watcher_editor import WatcherEditorWidget
 from .settings import AppSettings, load_settings, save_settings
 from .settings_dialog import DeviceSettingsDialog
 
@@ -89,9 +90,11 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.scene_editor = SceneEditorWidget(self)
         self.flow_editor = FlowEditorWidget(self)
+        self.watcher_editor = WatcherEditorWidget(self)
         self.runner = RunnerWidget(self)
         self.tabs.addTab(self.scene_editor, "シーン編集")
         self.tabs.addTab(self.flow_editor, "フロー編集")
+        self.tabs.addTab(self.watcher_editor, "ウォッチャー")
         self.tabs.addTab(self.runner, "ランナー")
         root.addWidget(self.tabs, 1)
 
