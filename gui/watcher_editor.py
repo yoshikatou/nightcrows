@@ -1,36 +1,38 @@
 """ウォッチャー編集タブ。
 
 watchers.json をフローとは独立して管理する。
-どのフローを実行中でも共通のウォッチャーが適用される。
-条件種別ごとにフォームを切り替え、ハンドラシーン・発火後動作を設定できる。
+新規作成はスクショベースのウィザード形式：
+  ① タイトル入力 + スクショ取得 + 範囲ドラッグ選択
+  ② 検知条件（画像出現/消滅/OCR数値）+ アクション設定
 """
 from __future__ import annotations
 
 import os
 import uuid
 
+import cv2
+import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QBrush, QFont
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPushButton, QRadioButton, QSpinBox, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
-# QLineEdit は _WatcherDialog 内の id_edit / handler_edit / whitelist_edit で使用
 
 from .flow import Condition, Watcher, load_watchers, save_watchers
-from .ocr_test_dialog import OcrTestDialog
+from .ocr_test_dialog import ImageCanvas
 
 WATCHERS_PATH = "watchers.json"
-SCENES_DIR = "scenes"
 TEMPLATES_DIR = "templates"
+SCENES_DIR = "scenes"
 
 _COND_LABELS = {
     "image_appear": "画像が出現したとき",
     "image_gone":   "画像が消えたとき",
-    "digit_threshold": "数字が閾値を超えたとき（テンプレマッチ）",
-    "ocr_number":   "数字が閾値を超えたとき（OCR — ポーション残量・HP など）",
+    "ocr_number":   "数値で判定（OCR）",
 }
 
 _AFTER_LABELS = {
@@ -40,426 +42,386 @@ _AFTER_LABELS = {
 }
 
 
-# ---------------------------------------------------------------- 条件フォーム
-class _ImageConditionForm(QWidget):
-    """image_appear / image_gone 共通フォーム。"""
-
-    def __init__(self, show_consecutive: bool = False) -> None:
-        super().__init__()
-        self._show_cons = show_consecutive
-        lay = QFormLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-
-        # テンプレ画像
-        h = QHBoxLayout()
-        self.tmpl_edit = QLineEdit()
-        self.tmpl_edit.setPlaceholderText("templates/ 以下の画像ファイル")
-        btn = QPushButton("参照")
-        btn.setFixedWidth(50)
-        btn.clicked.connect(self._browse)
-        h.addWidget(self.tmpl_edit, 1)
-        h.addWidget(btn)
-        lay.addRow("テンプレ画像:", h)
-
-        # Region
-        rh = QHBoxLayout()
-        self.rx = QSpinBox(); self.rx.setRange(0, 9999); self.rx.setPrefix("x:")
-        self.ry = QSpinBox(); self.ry.setRange(0, 9999); self.ry.setPrefix("y:")
-        self.rw = QSpinBox(); self.rw.setRange(0, 9999); self.rw.setPrefix("w:")
-        self.rh_spin = QSpinBox(); self.rh_spin.setRange(0, 9999); self.rh_spin.setPrefix("h:")
-        for sp in (self.rx, self.ry, self.rw, self.rh_spin):
-            rh.addWidget(sp)
-        self.region_check = QCheckBox("領域指定")
-        self.region_check.stateChanged.connect(self._on_region_toggle)
-        lay.addRow(self.region_check, rh)
-        self._on_region_toggle(Qt.Unchecked)
-
-        # 閾値
-        self.threshold = QDoubleSpinBox()
-        self.threshold.setRange(0.0, 1.0)
-        self.threshold.setSingleStep(0.01)
-        self.threshold.setValue(0.85)
-        self.threshold.setDecimals(2)
-        lay.addRow("マッチ閾値:", self.threshold)
-
-        # consecutive (image_gone のみ)
-        self.cons_label = QLabel("連続ミス回数:")
-        self.cons_spin = QSpinBox()
-        self.cons_spin.setRange(1, 30)
-        self.cons_spin.setValue(3)
-        if not show_consecutive:
-            self.cons_label.hide()
-            self.cons_spin.hide()
-        lay.addRow(self.cons_label, self.cons_spin)
-
-    def _browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "テンプレ画像選択", TEMPLATES_DIR,
-            "画像 (*.png *.jpg *.bmp)"
-        )
-        if path:
-            self.tmpl_edit.setText(path)
-
-    def _on_region_toggle(self, state) -> None:
-        on = bool(state)
-        for sp in (self.rx, self.ry, self.rw, self.rh_spin):
-            sp.setEnabled(on)
-
-    def load(self, c: Condition) -> None:
-        self.tmpl_edit.setText(c.template)
-        self.threshold.setValue(c.threshold)
-        if c.region and len(c.region) == 4:
-            self.region_check.setChecked(True)
-            self.rx.setValue(c.region[0])
-            self.ry.setValue(c.region[1])
-            self.rw.setValue(c.region[2])
-            self.rh_spin.setValue(c.region[3])
-        else:
-            self.region_check.setChecked(False)
-        self.cons_spin.setValue(c.consecutive)
-
-    def to_condition(self, ctype: str) -> Condition:
-        region = []
-        if self.region_check.isChecked():
-            region = [self.rx.value(), self.ry.value(),
-                      self.rw.value(), self.rh_spin.value()]
-        return Condition(
-            type=ctype,
-            template=self.tmpl_edit.text().strip(),
-            region=region,
-            threshold=self.threshold.value(),
-            consecutive=self.cons_spin.value(),
-        )
+# ------------------------------------------------------------------ ユーティリティ
+def _np_to_pixmap(img: np.ndarray, max_w: int = 300, max_h: int = 120) -> QPixmap:
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w = rgb.shape[:2]
+    qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888)
+    pix = QPixmap.fromImage(qimg)
+    return pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
-class _DigitConditionForm(QWidget):
-    """digit_threshold フォーム。"""
+# ================================================================== ウィザード
+class _WatcherWizard(QDialog):
+    """スクショベースのウォッチャー作成/編集ウィザード（2ページ）。"""
 
-    def __init__(self) -> None:
-        super().__init__()
-        lay = QFormLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-
-        # digits_dir
-        h = QHBoxLayout()
-        self.dir_edit = QLineEdit()
-        self.dir_edit.setPlaceholderText("0.png〜9.png が入ったフォルダ")
-        btn = QPushButton("参照")
-        btn.setFixedWidth(50)
-        btn.clicked.connect(self._browse)
-        h.addWidget(self.dir_edit, 1)
-        h.addWidget(btn)
-        lay.addRow("桁テンプレフォルダ:", h)
-
-        # Region
-        rh = QHBoxLayout()
-        self.rx = QSpinBox(); self.rx.setRange(0, 9999); self.rx.setPrefix("x:")
-        self.ry = QSpinBox(); self.ry.setRange(0, 9999); self.ry.setPrefix("y:")
-        self.rw = QSpinBox(); self.rw.setRange(0, 9999); self.rw.setPrefix("w:")
-        self.rh_spin = QSpinBox(); self.rh_spin.setRange(0, 9999); self.rh_spin.setPrefix("h:")
-        for sp in (self.rx, self.ry, self.rw, self.rh_spin):
-            rh.addWidget(sp)
-        self.region_check = QCheckBox("領域指定")
-        self.region_check.stateChanged.connect(self._on_region_toggle)
-        lay.addRow(self.region_check, rh)
-        self._on_region_toggle(Qt.Unchecked)
-
-        # op / value
-        hv = QHBoxLayout()
-        self.op_combo = QComboBox()
-        for op in ("<", "<=", ">", ">=", "=="):
-            self.op_combo.addItem(op, op)
-        hv.addWidget(self.op_combo)
-        self.value_spin = QSpinBox()
-        self.value_spin.setRange(0, 99999)
-        hv.addWidget(self.value_spin)
-        hv.addStretch()
-        lay.addRow("条件（数値）:", hv)
-
-    def _browse(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "桁テンプレフォルダ選択", "")
-        if d:
-            self.dir_edit.setText(d)
-
-    def _on_region_toggle(self, state) -> None:
-        on = bool(state)
-        for sp in (self.rx, self.ry, self.rw, self.rh_spin):
-            sp.setEnabled(on)
-
-    def load(self, c: Condition) -> None:
-        self.dir_edit.setText(c.digits_dir)
-        if c.region and len(c.region) == 4:
-            self.region_check.setChecked(True)
-            self.rx.setValue(c.region[0])
-            self.ry.setValue(c.region[1])
-            self.rw.setValue(c.region[2])
-            self.rh_spin.setValue(c.region[3])
-        else:
-            self.region_check.setChecked(False)
-        idx = self.op_combo.findData(c.op)
-        if idx >= 0:
-            self.op_combo.setCurrentIndex(idx)
-        self.value_spin.setValue(c.value)
-
-    def to_condition(self) -> Condition:
-        region = []
-        if self.region_check.isChecked():
-            region = [self.rx.value(), self.ry.value(),
-                      self.rw.value(), self.rh_spin.value()]
-        return Condition(
-            type="digit_threshold",
-            digits_dir=self.dir_edit.text().strip(),
-            region=region,
-            op=self.op_combo.currentData(),
-            value=self.value_spin.value(),
-        )
-
-
-class _OcrConditionForm(QWidget):
-    """ocr_number フォーム — Tesseract OCR で数値を読む。"""
-
-    def __init__(self) -> None:
-        super().__init__()
-        lay = QFormLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-
-        # Region
-        rh = QHBoxLayout()
-        self.rx = QSpinBox(); self.rx.setRange(0, 9999); self.rx.setPrefix("x:")
-        self.ry = QSpinBox(); self.ry.setRange(0, 9999); self.ry.setPrefix("y:")
-        self.rw = QSpinBox(); self.rw.setRange(0, 9999); self.rw.setPrefix("w:")
-        self.rh_spin = QSpinBox(); self.rh_spin.setRange(0, 9999); self.rh_spin.setPrefix("h:")
-        for sp in (self.rx, self.ry, self.rw, self.rh_spin):
-            rh.addWidget(sp)
-        lay.addRow("読み取り領域:", rh)
-
-        hint = QLabel("※「🔬 OCR テスト」ボタンでスクショから範囲を選択して自動入力できます")
-        hint.setStyleSheet("color: #666; font-size: 9px;")
-        hint.setWordWrap(True)
-        lay.addRow("", hint)
-
-        # 文字種ホワイトリスト
-        self.whitelist_edit = QLineEdit("0123456789")
-        self.whitelist_edit.setPlaceholderText("例: 0123456789 （空白=制限なし）")
-        lay.addRow("文字種:", self.whitelist_edit)
-
-        # op / value
-        hv = QHBoxLayout()
-        self.op_combo = QComboBox()
-        for op in ("<", "<=", ">", ">=", "=="):
-            self.op_combo.addItem(op, op)
-        hv.addWidget(self.op_combo)
-        self.value_spin = QSpinBox()
-        self.value_spin.setRange(0, 99999)
-        hv.addWidget(self.value_spin)
-        hv.addStretch()
-        lay.addRow("発火条件（数値）:", hv)
-
-    def get_region(self) -> list[int] | None:
-        w = self.rw.value(); h = self.rh_spin.value()
-        if w <= 0 or h <= 0:
-            return None
-        return [self.rx.value(), self.ry.value(), w, h]
-
-    def set_region(self, region: list[int]) -> None:
-        if len(region) != 4:
-            return
-        for sp, v in zip((self.rx, self.ry, self.rw, self.rh_spin), region):
-            sp.setValue(v)
-
-    def load(self, c: Condition) -> None:
-        if c.region and len(c.region) == 4:
-            self.set_region(c.region)
-        self.whitelist_edit.setText(c.ocr_whitelist)
-        idx = self.op_combo.findData(c.op)
-        if idx >= 0:
-            self.op_combo.setCurrentIndex(idx)
-        self.value_spin.setValue(c.value)
-
-    def to_condition(self) -> Condition:
-        region = self.get_region() or []
-        return Condition(
-            type="ocr_number",
-            region=region,
-            ocr_whitelist=self.whitelist_edit.text().strip(),
-            op=self.op_combo.currentData(),
-            value=self.value_spin.value(),
-        )
-
-
-# -------------------------------------------------------------- 編集ダイアログ
-class _WatcherDialog(QDialog):
-    """ウォッチャー 1件の追加/編集ダイアログ。"""
-
-    def __init__(self, watcher: Watcher | None = None,
+    def __init__(self, serial: str | None = None,
+                 watcher: Watcher | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("ウォッチャー設定")
-        self.setMinimumSize(520, 580)
+        self.setMinimumSize(860, 660)
 
-        lay = QVBoxLayout(self)
+        self._serial = serial
+        self._edit_watcher = watcher   # 編集時の元データ
+        self._img: np.ndarray | None = None      # フルスクショ
+        self._crop: np.ndarray | None = None     # 選択範囲の切り抜き
+        self._region: list[int] = []             # [x, y, w, h]
+        self._result: Watcher | None = None
 
+        root = QVBoxLayout(self)
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        self._page0 = self._build_page0()
+        self._page1 = self._build_page1()
+        self._stack.addWidget(self._page0)
+        self._stack.addWidget(self._page1)
+
+        if watcher:
+            self._prefill(watcher)
+
+    # =========================================================== ページ0
+    def _build_page0(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(6)
+
+        lay.addWidget(QLabel("① タイトルを入力し、スマホ画面をキャプチャして監視したい箇所をドラッグで選択してください"))
+
+        # タイトル
         form = QFormLayout()
-
-        # タイトル（必須）
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("例: ポーション低下、体力ピンチ、PVP攻撃")
+        self.title_edit.textChanged.connect(self._update_next_btn)
         form.addRow("タイトル (必須):", self.title_edit)
-
-        self.enabled_check = QCheckBox("有効")
-        self.enabled_check.setChecked(True)
-        form.addRow("", self.enabled_check)
-
-        self.priority_spin = QSpinBox()
-        self.priority_spin.setRange(0, 999)
-        form.addRow("優先度 (大きいほど優先):", self.priority_spin)
-
         lay.addLayout(form)
 
-        # 条件種別
-        grp_cond = QGroupBox("検知条件")
+        # キャプチャボタン
+        cap_row = QHBoxLayout()
+        btn_cap = QPushButton("📷 スクショ取得（接続中デバイス）")
+        btn_cap.clicked.connect(self._capture)
+        btn_file = QPushButton("📂 ファイルから開く")
+        btn_file.clicked.connect(self._open_file)
+        cap_row.addWidget(btn_cap)
+        cap_row.addWidget(btn_file)
+        cap_row.addStretch()
+        lay.addLayout(cap_row)
+
+        self._hint0 = QLabel("← スクショを取得後、監視したい箇所をドラッグで囲んでください")
+        self._hint0.setStyleSheet("color: #777; font-size: 10px;")
+        lay.addWidget(self._hint0)
+
+        # キャンバス
+        self._canvas = ImageCanvas()
+        self._canvas.region_selected.connect(self._on_region_selected)
+        lay.addWidget(self._canvas, 1)
+
+        # 切り抜きプレビュー
+        prev_row = QHBoxLayout()
+        prev_row.addWidget(QLabel("選択範囲:"))
+        self._crop_label0 = QLabel("（未選択）")
+        self._crop_label0.setMinimumHeight(60)
+        self._crop_label0.setStyleSheet("border:1px solid #aaa; background:#111;")
+        self._crop_label0.setAlignment(Qt.AlignCenter)
+        prev_row.addWidget(self._crop_label0, 1)
+        lay.addLayout(prev_row)
+
+        # ナビ
+        nav = QHBoxLayout()
+        nav.addStretch()
+        self._btn_next = QPushButton("次へ →")
+        self._btn_next.setEnabled(False)
+        self._btn_next.setFixedWidth(120)
+        self._btn_next.clicked.connect(self._go_page1)
+        nav.addWidget(self._btn_next)
+        lay.addLayout(nav)
+
+        return page
+
+    # =========================================================== ページ1
+    def _build_page1(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(6)
+
+        lay.addWidget(QLabel("② 検知方法とアクションを設定してください"))
+
+        top = QHBoxLayout()
+
+        # 左: 切り抜き大表示
+        left = QVBoxLayout()
+        left.addWidget(QLabel("選択した範囲:"))
+        self._crop_label1 = QLabel()
+        self._crop_label1.setFixedSize(260, 160)
+        self._crop_label1.setStyleSheet("border:1px solid #aaa; background:#111;")
+        self._crop_label1.setAlignment(Qt.AlignCenter)
+        left.addWidget(self._crop_label1)
+        left.addStretch()
+        top.addLayout(left)
+
+        # 右: 条件 + アクション
+        right = QVBoxLayout()
+
+        # 検知方法ラジオ
+        grp_type = QGroupBox("検知方法")
+        type_lay = QVBoxLayout(grp_type)
+        self._type_group = QButtonGroup(self)
+        self._rb_appear = QRadioButton("📷 画像が出現したとき（HP低下アイコン・PVP開始など）")
+        self._rb_gone   = QRadioButton("📷 画像が消えたとき")
+        self._rb_ocr    = QRadioButton("🔢 数値で判定（ポーション残量・HPなど）")
+        self._rb_appear.setChecked(True)
+        for i, rb in enumerate((self._rb_appear, self._rb_gone, self._rb_ocr)):
+            self._type_group.addButton(rb, i)
+            type_lay.addWidget(rb)
+        self._type_group.idClicked.connect(self._on_type_changed)
+        right.addWidget(grp_type)
+
+        # 条件設定（スタック）
+        grp_cond = QGroupBox("条件の詳細")
         cond_lay = QVBoxLayout(grp_cond)
+        self._cond_stack = QStackedWidget()
 
-        self.cond_combo = QComboBox()
-        for key, label in _COND_LABELS.items():
-            self.cond_combo.addItem(label, key)
-        self.cond_combo.currentIndexChanged.connect(self._on_cond_changed)
-        cond_lay.addWidget(self.cond_combo)
+        # image_appear ページ
+        p_appear = QWidget()
+        f_appear = QFormLayout(p_appear)
+        self.threshold_appear = QDoubleSpinBox()
+        self.threshold_appear.setRange(0.0, 1.0); self.threshold_appear.setSingleStep(0.01)
+        self.threshold_appear.setValue(0.85); self.threshold_appear.setDecimals(2)
+        f_appear.addRow("マッチ閾値 (0〜1):", self.threshold_appear)
+        hint_appear = QLabel("選択範囲がこの画像と一致したときに発火します")
+        hint_appear.setStyleSheet("color:#555; font-size:9px;"); hint_appear.setWordWrap(True)
+        f_appear.addRow("", hint_appear)
+        self._cond_stack.addWidget(p_appear)
 
-        self.stack = QStackedWidget()
-        self.form_appear = _ImageConditionForm(show_consecutive=False)
-        self.form_gone   = _ImageConditionForm(show_consecutive=True)
-        self.form_digit  = _DigitConditionForm()
-        self.form_ocr    = _OcrConditionForm()
-        self.stack.addWidget(self.form_appear)   # index 0
-        self.stack.addWidget(self.form_gone)     # index 1
-        self.stack.addWidget(self.form_digit)    # index 2
-        self.stack.addWidget(self.form_ocr)      # index 3
-        cond_lay.addWidget(self.stack)
+        # image_gone ページ
+        p_gone = QWidget()
+        f_gone = QFormLayout(p_gone)
+        self.threshold_gone = QDoubleSpinBox()
+        self.threshold_gone.setRange(0.0, 1.0); self.threshold_gone.setSingleStep(0.01)
+        self.threshold_gone.setValue(0.85); self.threshold_gone.setDecimals(2)
+        f_gone.addRow("マッチ閾値 (0〜1):", self.threshold_gone)
+        self.consecutive = QSpinBox()
+        self.consecutive.setRange(1, 30); self.consecutive.setValue(3)
+        f_gone.addRow("連続ミス回数:", self.consecutive)
+        hint_gone = QLabel("選択範囲の画像がN回連続して検出されなくなったときに発火します")
+        hint_gone.setStyleSheet("color:#555; font-size:9px;"); hint_gone.setWordWrap(True)
+        f_gone.addRow("", hint_gone)
+        self._cond_stack.addWidget(p_gone)
 
-        # OCR テストボタン（ocr_number 選択時のみ有効化）
-        self._btn_ocr_test = QPushButton("🔬 OCR テスト（範囲選択＆数値確認）")
-        self._btn_ocr_test.clicked.connect(self._open_ocr_test)
-        self._btn_ocr_test.setEnabled(False)
-        cond_lay.addWidget(self._btn_ocr_test)
+        # ocr_number ページ
+        p_ocr = QWidget()
+        f_ocr = QFormLayout(p_ocr)
+        self.ocr_whitelist = QLineEdit("0123456789")
+        f_ocr.addRow("読み取る文字種:", self.ocr_whitelist)
+        op_row = QHBoxLayout()
+        self.ocr_op = QComboBox()
+        for op in ("<", "<=", ">", ">=", "=="):
+            self.ocr_op.addItem(op, op)
+        self.ocr_op.setCurrentIndex(1)  # "<=" default
+        op_row.addWidget(self.ocr_op)
+        self.ocr_value = QSpinBox(); self.ocr_value.setRange(0, 99999)
+        op_row.addWidget(self.ocr_value); op_row.addStretch()
+        f_ocr.addRow("発火条件 (数値):", op_row)
+        btn_ocr_test = QPushButton("▶ OCRテスト（切り抜き範囲で数値を確認）")
+        btn_ocr_test.clicked.connect(self._run_ocr_test)
+        f_ocr.addRow("", btn_ocr_test)
+        self._ocr_result_lbl = QLabel("（テスト未実行）")
+        self._ocr_result_lbl.setStyleSheet("font-weight:bold; color:#1565c0;")
+        f_ocr.addRow("OCR結果:", self._ocr_result_lbl)
+        self._cond_stack.addWidget(p_ocr)
 
-        lay.addWidget(grp_cond)
+        cond_lay.addWidget(self._cond_stack)
+        right.addWidget(grp_cond)
 
-        # ハンドラ
-        grp_handler = QGroupBox("発火時の動作")
-        h_lay = QFormLayout(grp_handler)
-
+        # アクション設定
+        grp_act = QGroupBox("発火時のアクション")
+        act_lay = QFormLayout(grp_act)
         hh = QHBoxLayout()
         self.handler_edit = QLineEdit()
         self.handler_edit.setPlaceholderText("scenes/ 以下の .json（省略可）")
-        btn_h = QPushButton("参照")
-        btn_h.setFixedWidth(50)
+        btn_h = QPushButton("参照"); btn_h.setFixedWidth(50)
         btn_h.clicked.connect(self._browse_handler)
-        hh.addWidget(self.handler_edit, 1)
-        hh.addWidget(btn_h)
-        h_lay.addRow("実行シーン:", hh)
-
+        hh.addWidget(self.handler_edit, 1); hh.addWidget(btn_h)
+        act_lay.addRow("実行シーン:", hh)
         self.after_combo = QComboBox()
         for key, label in _AFTER_LABELS.items():
             self.after_combo.addItem(label, key)
-        h_lay.addRow("シーン完了後:", self.after_combo)
-
+        act_lay.addRow("完了後:", self.after_combo)
         self.cooldown_spin = QDoubleSpinBox()
-        self.cooldown_spin.setRange(0, 3600)
-        self.cooldown_spin.setSingleStep(1.0)
+        self.cooldown_spin.setRange(0, 3600); self.cooldown_spin.setSingleStep(1.0)
         self.cooldown_spin.setSuffix(" 秒")
-        h_lay.addRow("クールダウン:", self.cooldown_spin)
+        act_lay.addRow("クールダウン:", self.cooldown_spin)
+        self.priority_spin = QSpinBox()
+        self.priority_spin.setRange(0, 999)
+        act_lay.addRow("優先度 (大きいほど優先):", self.priority_spin)
+        self.enabled_check = QCheckBox("有効")
+        self.enabled_check.setChecked(True)
+        act_lay.addRow("", self.enabled_check)
+        right.addWidget(grp_act)
 
-        lay.addWidget(grp_handler)
+        top.addLayout(right, 1)
+        lay.addLayout(top, 1)
 
-        # ボタン
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._on_ok)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-        if watcher:
-            self._load(watcher)
-
-    def _on_cond_changed(self, idx: int) -> None:
-        self.stack.setCurrentIndex(idx)
-        ctype = self.cond_combo.itemData(idx)
-        self._btn_ocr_test.setEnabled(ctype == "ocr_number")
-
-    def _open_ocr_test(self) -> None:
-        serial = getattr(self.parent(), "_mw", None)
-        serial = serial.current_serial if serial else None
-        # parent チェーン経由で MainWindow を探す
-        p = self.parent()
-        while p is not None:
-            if hasattr(p, "current_serial"):
-                serial = p.current_serial
-                break
-            p = p.parent() if hasattr(p, "parent") else None
-
-        existing = self.form_ocr.get_region()
-        dlg = OcrTestDialog(
-            serial=serial,
-            initial_region=existing if existing else None,
-            parent=self,
+        # ナビ
+        nav = QHBoxLayout()
+        btn_back = QPushButton("← 戻る")
+        btn_back.clicked.connect(lambda: self._stack.setCurrentIndex(0))
+        self._btn_ok = QPushButton("✓ 確定")
+        self._btn_ok.setStyleSheet(
+            "QPushButton{background:#1565c0;color:white;font-weight:bold;padding:6px;}"
+            "QPushButton:hover{background:#0d47a1;}"
         )
-        if dlg.exec() == OcrTestDialog.Accepted:
-            region = dlg.result_region()
-            if region:
-                self.form_ocr.set_region(region)
+        self._btn_ok.clicked.connect(self._on_ok)
+        btn_cancel = QPushButton("キャンセル")
+        btn_cancel.clicked.connect(self.reject)
+        nav.addWidget(btn_back)
+        nav.addStretch()
+        nav.addWidget(btn_cancel)
+        nav.addWidget(self._btn_ok)
+        lay.addLayout(nav)
+
+        return page
+
+    # =========================================================== ページ0 ロジック
+    def _capture(self) -> None:
+        if not self._serial:
+            QMessageBox.information(self, "情報",
+                "デバイスが接続されていません。\n"
+                "メイン画面でデバイスに接続してから実行してください。")
+            return
+        try:
+            from .adb import screencap
+            self._hint0.setText("取得中…")
+            self.repaint()
+            png = screencap(self._serial)
+            arr = np.frombuffer(png, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("デコード失敗")
+            self._img = img
+            self._canvas.set_image(img)
+            self._hint0.setText("監視したい箇所をドラッグで囲んでください")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"スクショ取得失敗:\n{e}")
+
+    def _open_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "画像を開く", "", "画像 (*.png *.jpg *.bmp)")
+        if not path:
+            return
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        if img is None:
+            QMessageBox.critical(self, "エラー", f"画像を開けませんでした: {path}")
+            return
+        self._img = img
+        self._canvas.set_image(img)
+        self._hint0.setText("監視したい箇所をドラッグで囲んでください")
+
+    def _on_region_selected(self, x: int, y: int, w: int, h: int) -> None:
+        self._region = [x, y, w, h]
+        self._update_crop()
+        self._update_next_btn()
+
+    def _update_crop(self) -> None:
+        if self._img is None or not self._region:
+            return
+        x, y, w, h = self._region
+        ih, iw = self._img.shape[:2]
+        crop = self._img[max(0,y):min(y+h,ih), max(0,x):min(x+w,iw)]
+        if crop.size == 0:
+            return
+        self._crop = crop.copy()
+        pix = _np_to_pixmap(crop, 400, 80)
+        self._crop_label0.setPixmap(pix)
+        self._crop_label0.setText("")
+
+    def _update_next_btn(self) -> None:
+        ok = bool(self.title_edit.text().strip()) and bool(self._region)
+        self._btn_next.setEnabled(ok)
+
+    def _go_page1(self) -> None:
+        if self._crop is not None:
+            pix = _np_to_pixmap(self._crop, 260, 160)
+            self._crop_label1.setPixmap(pix)
+            self._crop_label1.setText("")
+        self._stack.setCurrentIndex(1)
+
+    # =========================================================== ページ1 ロジック
+    def _on_type_changed(self, idx: int) -> None:
+        self._cond_stack.setCurrentIndex(idx)
 
     def _browse_handler(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "ハンドラシーン選択", SCENES_DIR, "JSON (*.json)"
-        )
+            self, "ハンドラシーン選択", SCENES_DIR, "JSON (*.json)")
         if path:
             rel = os.path.relpath(path, SCENES_DIR).replace("\\", "/")
             self.handler_edit.setText(rel)
 
-    def _load(self, w: Watcher) -> None:
-        self.title_edit.setText(w.title)
-        self.enabled_check.setChecked(w.enabled)
-        self.priority_spin.setValue(w.priority)
-
-        ctype = w.condition.type
-        idx = self.cond_combo.findData(ctype)
-        if idx >= 0:
-            self.cond_combo.setCurrentIndex(idx)
-        if ctype == "image_appear":
-            self.form_appear.load(w.condition)
-        elif ctype == "image_gone":
-            self.form_gone.load(w.condition)
-        elif ctype == "digit_threshold":
-            self.form_digit.load(w.condition)
-        elif ctype == "ocr_number":
-            self.form_ocr.load(w.condition)
-
-        self.handler_edit.setText(w.handler)
-        idx2 = self.after_combo.findData(w.after)
-        if idx2 >= 0:
-            self.after_combo.setCurrentIndex(idx2)
-        self.cooldown_spin.setValue(w.cooldown_s)
-
-    def _on_ok(self) -> None:
-        if not self.title_edit.text().strip():
-            QMessageBox.warning(self, "入力エラー", "タイトルは必須です")
-            self.title_edit.setFocus()
+    def _run_ocr_test(self) -> None:
+        if self._crop is None:
+            QMessageBox.information(self, "情報", "ページ1でスクショ範囲を選択してください")
             return
-        self.accept()
+        try:
+            import pytesseract
+        except ImportError:
+            QMessageBox.warning(self, "未インストール",
+                "pytesseract がインストールされていません。\n"
+                "pip install pytesseract を実行し、\n"
+                "Tesseract-OCR もインストールしてください。")
+            return
+        wl = self.ocr_whitelist.text().strip()
+        config = "--psm 7 --oem 3"
+        if wl:
+            config += f" -c tessedit_char_whitelist={wl}"
+        try:
+            gray = cv2.cvtColor(self._crop, cv2.COLOR_BGR2GRAY)
+            gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            text = pytesseract.image_to_string(gray, config=config).strip()
+            if text:
+                self._ocr_result_lbl.setText(text)
+                self._ocr_result_lbl.setStyleSheet("font-weight:bold; color:#1b5e20; font-size:16px;")
+            else:
+                self._ocr_result_lbl.setText("読み取れませんでした — 範囲や文字種を変更してみてください")
+                self._ocr_result_lbl.setStyleSheet("font-weight:bold; color:#c62828;")
+        except Exception as e:
+            self._ocr_result_lbl.setText(f"エラー: {e}")
 
-    def result_watcher(self) -> Watcher:
-        wid = str(uuid.uuid4())[:8]
-        ctype = self.cond_combo.currentData()
+    # =========================================================== 確定・読込
+    def _on_ok(self) -> None:
+        ctype_idx = self._type_group.checkedId()
+        ctype = ["image_appear", "image_gone", "ocr_number"][ctype_idx]
+
+        template_path = ""
+        if ctype in ("image_appear", "image_gone"):
+            # 切り抜き画像をテンプレートとして保存
+            if self._crop is None:
+                QMessageBox.warning(self, "エラー", "スクショ範囲が選択されていません")
+                return
+            os.makedirs(TEMPLATES_DIR, exist_ok=True)
+            wid = (self._edit_watcher.id if self._edit_watcher else str(uuid.uuid4())[:8])
+            fname = f"{wid}_{ctype}.png"
+            template_path = os.path.join(TEMPLATES_DIR, fname).replace("\\", "/")
+            cv2.imwrite(template_path, self._crop)
+
+        region = list(self._region)
+
         if ctype == "image_appear":
-            cond = self.form_appear.to_condition("image_appear")
+            cond = Condition(type="image_appear", template=template_path,
+                             region=region, threshold=self.threshold_appear.value())
         elif ctype == "image_gone":
-            cond = self.form_gone.to_condition("image_gone")
-        elif ctype == "ocr_number":
-            cond = self.form_ocr.to_condition()
+            cond = Condition(type="image_gone", template=template_path,
+                             region=region, threshold=self.threshold_gone.value(),
+                             consecutive=self.consecutive.value())
         else:
-            cond = self.form_digit.to_condition()
+            cond = Condition(type="ocr_number", region=region,
+                             ocr_whitelist=self.ocr_whitelist.text().strip(),
+                             op=self.ocr_op.currentData(),
+                             value=self.ocr_value.value())
 
-        return Watcher(
+        wid = (self._edit_watcher.id if self._edit_watcher else str(uuid.uuid4())[:8])
+        self._result = Watcher(
             id=wid,
             title=self.title_edit.text().strip(),
             enabled=self.enabled_check.isChecked(),
@@ -470,15 +432,63 @@ class _WatcherDialog(QDialog):
             cooldown_s=self.cooldown_spin.value(),
             interrupt="step_end",
         )
+        self.accept()
+
+    def _prefill(self, w: Watcher) -> None:
+        """編集時: 既存ウォッチャーの値をフォームに読み込む。"""
+        self.title_edit.setText(w.title)
+        self.enabled_check.setChecked(w.enabled)
+        self.priority_spin.setValue(w.priority)
+        self.handler_edit.setText(w.handler)
+        idx = self.after_combo.findData(w.after)
+        if idx >= 0:
+            self.after_combo.setCurrentIndex(idx)
+        self.cooldown_spin.setValue(w.cooldown_s)
+
+        ctype = w.condition.type
+        if ctype == "image_appear":
+            self._rb_appear.setChecked(True)
+            self._cond_stack.setCurrentIndex(0)
+            self.threshold_appear.setValue(w.condition.threshold)
+        elif ctype == "image_gone":
+            self._rb_gone.setChecked(True)
+            self._cond_stack.setCurrentIndex(1)
+            self.threshold_gone.setValue(w.condition.threshold)
+            self.consecutive.setValue(w.condition.consecutive)
+        elif ctype == "ocr_number":
+            self._rb_ocr.setChecked(True)
+            self._cond_stack.setCurrentIndex(2)
+            self.ocr_whitelist.setText(w.condition.ocr_whitelist)
+            idx2 = self.ocr_op.findData(w.condition.op)
+            if idx2 >= 0:
+                self.ocr_op.setCurrentIndex(idx2)
+            self.ocr_value.setValue(w.condition.value)
+
+        self._region = list(w.condition.region) if w.condition.region else []
+
+        # 既存テンプレート画像があれば表示
+        if ctype in ("image_appear", "image_gone") and w.condition.template:
+            img = cv2.imread(w.condition.template, cv2.IMREAD_COLOR)
+            if img is not None:
+                self._crop = img
+                self._img = img
+                self._canvas.set_image(img)
+                pix = _np_to_pixmap(img, 400, 80)
+                self._crop_label0.setPixmap(pix)
+                self._crop_label0.setText("")
+                pix1 = _np_to_pixmap(img, 260, 160)
+                self._crop_label1.setPixmap(pix1)
+                self._crop_label1.setText("")
+        elif ctype == "ocr_number" and self._region:
+            self._update_next_btn()
+
+    def result_watcher(self) -> Watcher | None:
+        return self._result
 
 
-# --------------------------------------------------------------- メインウィジェット
+# ================================================================== メインウィジェット
 class WatcherEditorWidget(QWidget):
-    """ウォッチャー一覧と編集を提供するタブウィジェット。
-
-    フローとは独立して watchers.json を管理する。
-    ランナー起動時にこのファイルが自動的に読み込まれ、すべてのフローに適用される。
-    """
+    """ウォッチャー一覧と編集を提供するタブウィジェット。"""
 
     def __init__(self, main_window) -> None:
         super().__init__()
@@ -491,7 +501,6 @@ class WatcherEditorWidget(QWidget):
         lay = QVBoxLayout(self)
         lay.setSpacing(6)
 
-        # ヘッダー
         hdr = QHBoxLayout()
         title = QLabel(f"グローバルウォッチャー  （保存先: {WATCHERS_PATH}）")
         title.setStyleSheet("font-weight: bold;")
@@ -509,12 +518,10 @@ class WatcherEditorWidget(QWidget):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        # リスト
         self.list = QListWidget()
         self.list.setAlternatingRowColors(True)
         lay.addWidget(self.list, 1)
 
-        # 操作ボタン
         btn_row = QHBoxLayout()
         self.btn_add    = QPushButton("＋ 追加")
         self.btn_edit   = QPushButton("✎ 編集")
@@ -555,16 +562,15 @@ class WatcherEditorWidget(QWidget):
             QMessageBox.critical(self, "エラー", f"保存失敗: {e}")
 
     def get_watchers(self) -> list[Watcher]:
-        """ランナーが起動時に呼ぶ。有効なウォッチャーリストを返す。"""
         return list(self._watchers)
 
-    # --------------------------------------------------------- リスト更新
+    # --------------------------------------------------------- リスト
     def _refresh_list(self) -> None:
         row = self.list.currentRow()
         self.list.clear()
         for w in self._watchers:
             self.list.addItem(self._make_item(w))
-        if row >= 0 and row < self.list.count():
+        if 0 <= row < self.list.count():
             self.list.setCurrentRow(row)
         self._on_selection_changed(self.list.currentRow())
 
@@ -575,20 +581,15 @@ class WatcherEditorWidget(QWidget):
         handler_name = (
             os.path.basename(w.handler).removesuffix(".json") if w.handler else "（なし）"
         )
-        display_title = w.title or w.id
         text = (
-            f"[{'✓' if w.enabled else '✗'}]  {display_title}  |  {cond_label}"
+            f"[{'✓' if w.enabled else '✗'}]  {w.title or w.id}  |  {cond_label}"
             f"\n      → {handler_name}  /  {after_label}"
             f"  /  優先度:{w.priority}  冷却:{w.cooldown_s:.0f}s"
         )
         item = QListWidgetItem(text)
         item.setData(Qt.UserRole, w.id)
-        if not w.enabled:
-            item.setForeground(QBrush(QColor("#aaa")))
-        else:
-            item.setForeground(QBrush(QColor("#111")))
-        font = QFont()
-        font.setPointSize(9)
+        item.setForeground(QBrush(QColor("#aaa" if not w.enabled else "#111")))
+        font = QFont(); font.setPointSize(9)
         item.setFont(font)
         return item
 
@@ -600,25 +601,27 @@ class WatcherEditorWidget(QWidget):
 
     # --------------------------------------------------------- CRUD
     def _add(self) -> None:
-        dlg = _WatcherDialog(parent=self)
+        dlg = _WatcherWizard(serial=self._mw.current_serial, parent=self)
         if dlg.exec() == QDialog.Accepted:
             w = dlg.result_watcher()
-            self._watchers.append(w)
-            self.list.addItem(self._make_item(w))
-            self.list.setCurrentRow(self.list.count() - 1)
+            if w:
+                self._watchers.append(w)
+                self.list.addItem(self._make_item(w))
+                self.list.setCurrentRow(self.list.count() - 1)
 
     def _edit(self) -> None:
         row = self.list.currentRow()
         if row < 0:
             return
-        w = self._watchers[row]
-        dlg = _WatcherDialog(watcher=w, parent=self)
+        dlg = _WatcherWizard(serial=self._mw.current_serial,
+                              watcher=self._watchers[row], parent=self)
         if dlg.exec() == QDialog.Accepted:
-            new_w = dlg.result_watcher()
-            self._watchers[row] = new_w
-            self.list.takeItem(row)
-            self.list.insertItem(row, self._make_item(new_w))
-            self.list.setCurrentRow(row)
+            w = dlg.result_watcher()
+            if w:
+                self._watchers[row] = w
+                self.list.takeItem(row)
+                self.list.insertItem(row, self._make_item(w))
+                self.list.setCurrentRow(row)
 
     def _delete(self) -> None:
         row = self.list.currentRow()

@@ -37,7 +37,7 @@ _WHITELIST_OPTIONS = {
 
 
 # ------------------------------------------------------------------ キャンバス
-class _ImageCanvas(QWidget):
+class ImageCanvas(QWidget):
     """スクショを表示し、マウスドラッグで範囲 (QRect, 画像座標) を選択する。"""
 
     region_selected = Signal(int, int, int, int)   # x, y, w, h (画像座標)
@@ -209,7 +209,7 @@ class OcrTestDialog(QDialog):
         root.addLayout(top)
 
         # --- 中央: キャンバス ---
-        self._canvas = _ImageCanvas()
+        self._canvas = ImageCanvas()
         self._canvas.region_selected.connect(self._on_region_selected)
         root.addWidget(self._canvas, 1)
 
