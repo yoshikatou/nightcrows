@@ -114,12 +114,25 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"✓ 接続中: {serial}")
             self.status_label.setStyleSheet("color: #1b5e20; padding-left: 4px;")
             self.btn_connect.setEnabled(True)
+            self.btn_connect.setStyleSheet(
+                "QPushButton { background-color: #388e3c; color: white; font-weight: bold; }"
+                "QPushButton:hover { background-color: #2e7d32; }"
+            )
             self.btn_disconnect.setEnabled(True)
+            self.btn_disconnect.setStyleSheet(
+                "QPushButton { background-color: #c62828; color: white; font-weight: bold; }"
+                "QPushButton:hover { background-color: #b71c1c; }"
+            )
         else:
             self.status_label.setText("未接続")
             self.status_label.setStyleSheet("color: #000; padding-left: 4px;")
             self.btn_connect.setEnabled(True)
+            self.btn_connect.setStyleSheet(
+                "QPushButton { background-color: #c62828; color: white; font-weight: bold; }"
+                "QPushButton:hover { background-color: #b71c1c; }"
+            )
             self.btn_disconnect.setEnabled(False)
+            self.btn_disconnect.setStyleSheet("")
 
     # --------------------------------------------------------- device combo
     def _reload_device_combo(self) -> None:
@@ -142,6 +155,9 @@ class MainWindow(QMainWindow):
         self.connect_stop.clear()
         self.scene_editor._log(f"接続試行: {ip}")
         self.btn_connect.setEnabled(False)
+        self.btn_connect.setStyleSheet(
+            "QPushButton { background-color: #f57c00; color: white; font-weight: bold; }"
+        )
         self.btn_disconnect.setEnabled(False)
         self.status_label.setText(f"… 接続試行中: {ip}")
         self.status_label.setStyleSheet("color: #f57c00; padding-left: 4px;")

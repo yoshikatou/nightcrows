@@ -9,7 +9,7 @@ from datetime import datetime
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox,
+    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -44,6 +44,8 @@ class SceneEditorWidget(QWidget):
         self.recorder: TapRecorder | None = None
         self._pixmap_cache: dict[str, QPixmap] = {}
 
+        self._marker_step_indices: list[int] = []
+
         self._build_ui()
 
         self.log_signal.connect(self._append_log)
@@ -65,6 +67,8 @@ class SceneEditorWidget(QWidget):
         self.canvas = SnapshotCanvas()
         self.canvas.clicked.connect(self._on_canvas_click)
         self.canvas.region_selected.connect(self._on_canvas_region)
+        self.canvas.marker_moved.connect(self._on_marker_moved)
+        self.canvas.right_clicked.connect(self._on_canvas_right_click)
         root.addWidget(self.canvas, 3)
 
         right = QVBoxLayout()
@@ -115,6 +119,8 @@ class SceneEditorWidget(QWidget):
         # ステップ一覧
         right.addWidget(QLabel("ステップ（行選択でスナップ切替・マーカー強調）:"))
         self.step_list = QListWidget()
+        self.step_list.setDragDropMode(QListWidget.InternalMove)
+        self.step_list.model().rowsMoved.connect(self._on_steps_reordered)
         self.step_list.currentRowChanged.connect(self._on_step_row_changed)
         right.addWidget(self.step_list, 2)
 
@@ -129,6 +135,15 @@ class SceneEditorWidget(QWidget):
         row4.addWidget(btn_add_scroll)
         row4.addWidget(btn_del)
         right.addLayout(row4)
+
+        row4b = QHBoxLayout()
+        btn_up = QPushButton("↑ 上へ")
+        btn_up.clicked.connect(self._move_step_up)
+        btn_down = QPushButton("↓ 下へ")
+        btn_down.clicked.connect(self._move_step_down)
+        row4b.addWidget(btn_up)
+        row4b.addWidget(btn_down)
+        right.addLayout(row4b)
 
         # 再生
         row5 = QHBoxLayout()
@@ -233,11 +248,23 @@ class SceneEditorWidget(QWidget):
         self._log(f"スナップ追加: {path}")
 
     # ------------------------------------------------------------ canvas ev
-    def _on_canvas_click(self, x: int, y: int) -> None:
+    def _on_canvas_right_click(self, x: int, y: int) -> None:
+        menu = QMenu(self)
+        act_tap = menu.addAction(f"タップ追加  ({x}, {y})")
+        action = menu.exec(self.canvas.mapToGlobal(
+            self.canvas.mapFromGlobal(self.cursor().pos())
+        ))
+        if action == act_tap:
+            self._add_tap_step(x, y)
+
+    def _add_tap_step(self, x: int, y: int) -> None:
         step = Step(type="tap", params={"x": x, "y": y, "duration_ms": 100})
         self.scene.steps.append(step)
         self._refresh_step_list(select_last=True)
         self._log(f"tap 追加: ({x},{y})")
+
+    def _on_canvas_click(self, x: int, y: int) -> None:
+        self._add_tap_step(x, y)
 
     def _on_canvas_region(self, x: int, y: int, w: int, h: int) -> None:
         pm = self.canvas.current_pixmap()
@@ -292,6 +319,43 @@ class SceneEditorWidget(QWidget):
         self._refresh_step_list()
         self._log(f"削除: {removed.type}")
 
+    def _on_steps_reordered(self, _parent, src, _end, _dst, dst) -> None:
+        # QListWidget の InternalMove はビューを先に動かすので、scene.steps をそれに合わせる
+        actual_dst = dst if dst > src else dst
+        step = self.scene.steps.pop(src)
+        self.scene.steps.insert(actual_dst, step)
+        self._refresh_canvas_view()
+
+    def _move_step_up(self) -> None:
+        row = self.step_list.currentRow()
+        if row <= 0 or row >= len(self.scene.steps):
+            return
+        steps = self.scene.steps
+        steps[row - 1], steps[row] = steps[row], steps[row - 1]
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(row - 1)
+
+    def _move_step_down(self) -> None:
+        row = self.step_list.currentRow()
+        if row < 0 or row >= len(self.scene.steps) - 1:
+            return
+        steps = self.scene.steps
+        steps[row], steps[row + 1] = steps[row + 1], steps[row]
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(row + 1)
+
+    def _on_marker_moved(self, marker_idx: int, lx: int, ly: int) -> None:
+        if marker_idx < 0 or marker_idx >= len(self._marker_step_indices):
+            return
+        step_idx = self._marker_step_indices[marker_idx]
+        s = self.scene.steps[step_idx]
+        old_x, old_y = s.params.get("x", 0), s.params.get("y", 0)
+        s.params["x"] = lx
+        s.params["y"] = ly
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(step_idx)
+        self._log(f"tap 移動: ({old_x},{old_y}) → ({lx},{ly})")
+
     def _refresh_step_list(self, select_last: bool = False) -> None:
         self.step_list.blockSignals(True)
         self.step_list.clear()
@@ -328,7 +392,9 @@ class SceneEditorWidget(QWidget):
         self._refresh_canvas_view()
 
     # ----------------------------------------------------------- canvas view
-    def _compute_view(self, selected_idx: int | None) -> tuple[str | None, list[tuple[int, int, int, bool]]]:
+    def _compute_view(
+        self, selected_idx: int | None
+    ) -> tuple[str | None, list[tuple[int, int, int, bool]], list[int]]:
         snapshots: list[str] = []
         group: list[int] = []
         current = -1
@@ -339,7 +405,7 @@ class SceneEditorWidget(QWidget):
             group.append(current)
 
         if not snapshots:
-            return None, []
+            return None, [], []
 
         if selected_idx is not None and 0 <= selected_idx < len(self.scene.steps):
             display_group = group[selected_idx]
@@ -349,9 +415,10 @@ class SceneEditorWidget(QWidget):
             highlight_idx = None
 
         if display_group < 0:
-            return None, []
+            return None, [], []
 
         markers: list[tuple[int, int, int, bool]] = []
+        marker_step_indices: list[int] = []
         n = 0
         for i, s in enumerate(self.scene.steps):
             if group[i] != display_group or s.type != "tap":
@@ -359,13 +426,14 @@ class SceneEditorWidget(QWidget):
             n += 1
             hi = (i == highlight_idx)
             markers.append((n, int(s.params.get("x", 0)), int(s.params.get("y", 0)), hi))
+            marker_step_indices.append(i)
 
-        return snapshots[display_group], markers
+        return snapshots[display_group], markers, marker_step_indices
 
     def _refresh_canvas_view(self) -> None:
         row = self.step_list.currentRow()
         sel = row if row >= 0 else None
-        path, markers = self._compute_view(sel)
+        path, markers, self._marker_step_indices = self._compute_view(sel)
         if path is None:
             self.canvas.set_snapshot(None)
             self.canvas.set_markers([])

@@ -2,6 +2,7 @@
 
 - クリック/ドラッグで座標・矩形を通知
 - 番号付きのタップマーカーを重ね描画できる
+- マーカーをドラッグして座標を移動できる
 """
 from __future__ import annotations
 
@@ -12,10 +13,14 @@ from PySide6.QtWidgets import QLabel
 
 Marker = tuple[int, int, int, bool]  # (番号, logical x, logical y, ハイライト)
 
+_HIT_RADIUS = 20  # widget px — マーカーのドラッグ開始判定距離
+
 
 class SnapshotCanvas(QLabel):
     clicked = Signal(int, int)
     region_selected = Signal(int, int, int, int)
+    marker_moved = Signal(int, int, int)  # marker_index, new_lx, new_ly
+    right_clicked = Signal(int, int)      # logical x, y
 
     def __init__(self) -> None:
         super().__init__()
@@ -23,6 +28,7 @@ class SnapshotCanvas(QLabel):
         self.setMinimumSize(400, 300)
         self.setStyleSheet("background-color: #202020; color: #ffffff;")
         self.setText("スナップショット未取得")
+        self.setMouseTracking(True)
 
         self._orig_pixmap: QPixmap | None = None
         self._scaled_pixmap: QPixmap | None = None
@@ -33,6 +39,9 @@ class SnapshotCanvas(QLabel):
         self._drag_start: QPoint | None = None
         self._drag_end: QPoint | None = None
         self._markers: list[Marker] = []
+
+        self._dragging_marker_idx: int | None = None
+        self._drag_marker_widget_pos: QPoint | None = None
 
     def set_snapshot(self, pixmap: QPixmap | None) -> None:
         self._orig_pixmap = pixmap
@@ -85,7 +94,9 @@ class SnapshotCanvas(QLabel):
         p.fillRect(self.rect(), Qt.black)
         p.drawPixmap(self._display_rect.topLeft(), self._scaled_pixmap)
 
-        for num, lx, ly, hi in self._markers:
+        for i, (num, lx, ly, hi) in enumerate(self._markers):
+            if i == self._dragging_marker_idx:
+                continue  # ドラッグ中は下で別描画
             wx = self._display_rect.left() + lx * self._scale
             wy = self._display_rect.top() + ly * self._scale
             radius = 22 if hi else 14
@@ -96,6 +107,24 @@ class SnapshotCanvas(QLabel):
             font = QFont()
             font.setBold(True)
             font.setPointSize(12 if hi else 9)
+            p.setFont(font)
+            p.setPen(QColor("black"))
+            rect = QRect(int(wx - radius), int(wy - radius),
+                         int(radius * 2), int(radius * 2))
+            p.drawText(rect, Qt.AlignCenter, str(num))
+
+        # ドラッグ中マーカーを緑でプレビュー表示
+        if self._dragging_marker_idx is not None and self._drag_marker_widget_pos is not None:
+            num, _lx, _ly, _hi = self._markers[self._dragging_marker_idx]
+            wx = float(self._drag_marker_widget_pos.x())
+            wy = float(self._drag_marker_widget_pos.y())
+            radius = 22
+            p.setBrush(QColor("#4CAF50"))
+            p.setPen(QPen(QColor("white"), 2))
+            p.drawEllipse(QPointF(wx, wy), radius, radius)
+            font = QFont()
+            font.setBold(True)
+            font.setPointSize(12)
             p.setFont(font)
             p.setPen(QColor("black"))
             rect = QRect(int(wx - radius), int(wy - radius),
@@ -115,18 +144,56 @@ class SnapshotCanvas(QLabel):
         ly = int((pt.y() - self._display_rect.top()) / self._scale)
         return lx, ly
 
+    def _find_marker_at(self, pt: QPoint) -> int | None:
+        for i, (num, lx, ly, hi) in enumerate(self._markers):
+            wx = self._display_rect.left() + lx * self._scale
+            wy = self._display_rect.top() + ly * self._scale
+            dist2 = (pt.x() - wx) ** 2 + (pt.y() - wy) ** 2
+            if dist2 <= _HIT_RADIUS ** 2:
+                return i
+        return None
+
     def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.RightButton:
+            logical = self._widget_to_logical(event.position().toPoint())
+            if logical:
+                self.right_clicked.emit(logical[0], logical[1])
+            return
         if event.button() == Qt.LeftButton:
-            self._drag_start = event.position().toPoint()
-            self._drag_end = self._drag_start
+            pt = event.position().toPoint()
+            idx = self._find_marker_at(pt)
+            if idx is not None:
+                self._dragging_marker_idx = idx
+                self._drag_marker_widget_pos = pt
+            else:
+                self._drag_start = pt
+                self._drag_end = pt
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        if self._drag_start is not None:
-            self._drag_end = event.position().toPoint()
+        pt = event.position().toPoint()
+        if self._dragging_marker_idx is not None:
+            self._drag_marker_widget_pos = pt
             self.update()
+        elif self._drag_start is not None:
+            self._drag_end = pt
+            self.update()
+        else:
+            # ホバー時のカーソル変更
+            if self._find_marker_at(pt) is not None:
+                self.setCursor(Qt.SizeAllCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        if self._drag_start is not None and self._drag_end is not None:
+        if self._dragging_marker_idx is not None:
+            if self._drag_marker_widget_pos is not None:
+                logical = self._widget_to_logical(self._drag_marker_widget_pos)
+                if logical:
+                    self.marker_moved.emit(self._dragging_marker_idx, logical[0], logical[1])
+            self._dragging_marker_idx = None
+            self._drag_marker_widget_pos = None
+            self.update()
+        elif self._drag_start is not None and self._drag_end is not None:
             s = self._widget_to_logical(self._drag_start)
             e = self._widget_to_logical(self._drag_end)
             if s and e:
@@ -136,6 +203,6 @@ class SnapshotCanvas(QLabel):
                     x = min(s[0], e[0]); y = min(s[1], e[1])
                     w = abs(e[0] - s[0]); h = abs(e[1] - s[1])
                     self.region_selected.emit(x, y, w, h)
-        self._drag_start = None
-        self._drag_end = None
-        self.update()
+            self._drag_start = None
+            self._drag_end = None
+            self.update()
