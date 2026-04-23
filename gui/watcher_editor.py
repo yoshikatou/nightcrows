@@ -103,12 +103,16 @@ class _WatcherWizard(QDialog):
         btn_cap.clicked.connect(self._capture)
         btn_file = QPushButton("📂 ファイルから開く")
         btn_file.clicked.connect(self._open_file)
+        btn_reset_zoom = QPushButton("🔍 ズームリセット")
+        btn_reset_zoom.clicked.connect(lambda: self._canvas.reset_zoom())
         cap_row.addWidget(btn_cap)
         cap_row.addWidget(btn_file)
+        cap_row.addWidget(btn_reset_zoom)
         cap_row.addStretch()
         lay.addLayout(cap_row)
 
-        self._hint0 = QLabel("← スクショを取得後、監視したい箇所をドラッグで囲んでください")
+        self._hint0 = QLabel("← スクショを取得後、監視したい箇所をドラッグで囲んでください  "
+                             "（ホイール:ズーム / 右ドラッグ:移動）")
         self._hint0.setStyleSheet("color: #777; font-size: 10px;")
         lay.addWidget(self._hint0)
 

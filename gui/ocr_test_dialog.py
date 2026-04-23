@@ -38,28 +38,43 @@ _WHITELIST_OPTIONS = {
 
 # ------------------------------------------------------------------ キャンバス
 class ImageCanvas(QWidget):
-    """スクショを表示し、マウスドラッグで範囲 (QRect, 画像座標) を選択する。"""
+    """スクショを表示し、マウス操作で範囲選択・ズーム・パンができるキャンバス。
+
+    操作方法:
+      左ドラッグ  : 範囲選択（ラバーバンド）
+      ホイール    : ズームイン/アウト（カーソル中心）
+      右ドラッグ  : 画像をパン（移動）
+    """
 
     region_selected = Signal(int, int, int, int)   # x, y, w, h (画像座標)
+
+    _MIN_ZOOM = 0.5
+    _MAX_ZOOM = 10.0
 
     def __init__(self) -> None:
         super().__init__()
         self.setMinimumSize(200, 150)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setCursor(Qt.CrossCursor)
+        self.setMouseTracking(True)
 
         self._pixmap: QPixmap | None = None
         self._img_w = 0
         self._img_h = 0
-        self._scale = 1.0
-        self._offset = QPoint(0, 0)
+        self._base_scale = 1.0   # ウィジェットにフィットさせる基本スケール
+        self._zoom = 1.0         # ユーザーのズーム倍率
+        self._offset = QPoint(0, 0)   # 基本スケール時の画像左上オフセット
+        self._pan = QPoint(0, 0)      # ズーム時のパンオフセット
 
         self._drag_start: QPoint | None = None
-        self._drag_rect: QRect | None = None     # ウィジェット座標
-        self._selected_rect: QRect | None = None  # 画像座標
+        self._drag_rect: QRect | None = None
+        self._selected_rect: QRect | None = None   # 画像座標
 
+        self._pan_start: QPoint | None = None
+        self._pan_start_saved: QPoint | None = None
+
+    # -------------------------------------------------------- 画像セット
     def set_image(self, img: np.ndarray) -> None:
-        """BGR numpy array をセットして表示。"""
         self._img_h, self._img_w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, self._img_w, self._img_h,
@@ -67,31 +82,43 @@ class ImageCanvas(QWidget):
         self._pixmap = QPixmap.fromImage(qimg)
         self._drag_rect = None
         self._selected_rect = None
-        self._update_scale()
+        self.reset_zoom()
+
+    def reset_zoom(self) -> None:
+        self._zoom = 1.0
+        self._pan = QPoint(0, 0)
+        self._update_base_scale()
         self.update()
 
-    def _update_scale(self) -> None:
-        if not self._pixmap:
+    def _update_base_scale(self) -> None:
+        if not self._pixmap or self._img_w == 0 or self._img_h == 0:
             return
-        sw = self.width() / self._img_w if self._img_w else 1.0
-        sh = self.height() / self._img_h if self._img_h else 1.0
-        self._scale = min(sw, sh, 1.0)  # 縮小のみ（拡大しない）
-        dw = int(self._img_w * self._scale)
-        dh = int(self._img_h * self._scale)
+        sw = self.width() / self._img_w
+        sh = self.height() / self._img_h
+        self._base_scale = min(sw, sh, 1.0)
+        dw = int(self._img_w * self._base_scale)
+        dh = int(self._img_h * self._base_scale)
         self._offset = QPoint((self.width() - dw) // 2,
                                (self.height() - dh) // 2)
 
+    def _total_scale(self) -> float:
+        return self._base_scale * self._zoom
+
     def resizeEvent(self, event) -> None:
-        self._update_scale()
+        self._update_base_scale()
         super().resizeEvent(event)
 
+    # -------------------------------------------------------- 描画
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#1e1e1e"))
         if self._pixmap:
-            dw = int(self._img_w * self._scale)
-            dh = int(self._img_h * self._scale)
-            painter.drawPixmap(self._offset.x(), self._offset.y(), dw, dh, self._pixmap)
+            ts = self._total_scale()
+            dw = int(self._img_w * ts)
+            dh = int(self._img_h * ts)
+            ox = self._offset.x() + self._pan.x()
+            oy = self._offset.y() + self._pan.y()
+            painter.drawPixmap(ox, oy, dw, dh, self._pixmap)
 
         if self._drag_rect and not self._drag_rect.isNull():
             pen = QPen(QColor("#ff6600"), 2, Qt.DashLine)
@@ -99,44 +126,102 @@ class ImageCanvas(QWidget):
             painter.drawRect(self._drag_rect.normalized())
 
         if self._selected_rect:
-            # 選択確定後は画像座標 → ウィジェット座標に変換して表示
             r = self._img_to_widget(self._selected_rect)
             pen = QPen(QColor("#00ff00"), 2, Qt.SolidLine)
             painter.setPen(pen)
             painter.drawRect(r)
 
+        # ズーム率オーバーレイ
+        if self._pixmap:
+            painter.setPen(QColor("#ffcc00"))
+            painter.drawText(
+                self.rect().adjusted(4, 4, -4, -4),
+                Qt.AlignBottom | Qt.AlignRight,
+                f"× {self._zoom:.1f}   ホイール:ズーム  右ドラッグ:移動"
+            )
+
+    # -------------------------------------------------------- 座標変換
     def _widget_to_img(self, p: QPoint) -> QPoint:
-        if self._scale == 0:
+        ts = self._total_scale()
+        if ts == 0:
             return p
-        x = int((p.x() - self._offset.x()) / self._scale)
-        y = int((p.y() - self._offset.y()) / self._scale)
+        x = int((p.x() - self._offset.x() - self._pan.x()) / ts)
+        y = int((p.y() - self._offset.y() - self._pan.y()) / ts)
         x = max(0, min(x, self._img_w - 1))
         y = max(0, min(y, self._img_h - 1))
         return QPoint(x, y)
 
     def _img_to_widget(self, r: QRect) -> QRect:
-        x = int(r.x() * self._scale) + self._offset.x()
-        y = int(r.y() * self._scale) + self._offset.y()
-        w = int(r.width() * self._scale)
-        h = int(r.height() * self._scale)
+        ts = self._total_scale()
+        x = int(r.x() * ts) + self._offset.x() + self._pan.x()
+        y = int(r.y() * ts) + self._offset.y() + self._pan.y()
+        w = int(r.width() * ts)
+        h = int(r.height() * ts)
         return QRect(x, y, w, h)
 
+    def _clamp_pan(self) -> None:
+        if not self._pixmap:
+            return
+        ts = self._total_scale()
+        dw = int(self._img_w * ts)
+        dh = int(self._img_h * ts)
+        margin = 40
+        px = max(-(dw - margin), min(self.width() - margin, self._pan.x()))
+        py = max(-(dh - margin), min(self.height() - margin, self._pan.y()))
+        self._pan = QPoint(px, py)
+
+    # -------------------------------------------------------- マウスイベント
+    def wheelEvent(self, event) -> None:
+        if not self._pixmap:
+            return
+        pos = event.position().toPoint()
+        delta = event.angleDelta().y()
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        new_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, self._zoom * factor))
+
+        # カーソル下の画像座標を固定してパン補正
+        ts = self._total_scale()
+        img_x = (pos.x() - self._offset.x() - self._pan.x()) / ts if ts else 0
+        img_y = (pos.y() - self._offset.y() - self._pan.y()) / ts if ts else 0
+
+        self._zoom = new_zoom
+        new_ts = self._total_scale()
+        self._pan = QPoint(
+            int(pos.x() - self._offset.x() - img_x * new_ts),
+            int(pos.y() - self._offset.y() - img_y * new_ts),
+        )
+        self._clamp_pan()
+        self.update()
+
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and self._pixmap:
+        if event.button() == Qt.RightButton and self._pixmap:
+            self._pan_start = event.position().toPoint()
+            self._pan_start_saved = QPoint(self._pan)
+            self.setCursor(Qt.ClosedHandCursor)
+        elif event.button() == Qt.LeftButton and self._pixmap:
             self._drag_start = event.position().toPoint()
             self._drag_rect = QRect(self._drag_start, self._drag_start)
             self._selected_rect = None
             self.update()
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag_start is not None:
+        if self._pan_start is not None:
+            delta = event.position().toPoint() - self._pan_start
+            self._pan = self._pan_start_saved + delta
+            self._clamp_pan()
+            self.update()
+        elif self._drag_start is not None:
             self._drag_rect = QRect(
                 self._drag_start, event.position().toPoint()
             ).normalized()
             self.update()
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and self._drag_start is not None:
+        if event.button() == Qt.RightButton:
+            self._pan_start = None
+            self._pan_start_saved = None
+            self.setCursor(Qt.CrossCursor)
+        elif event.button() == Qt.LeftButton and self._drag_start is not None:
             end = event.position().toPoint()
             rect_w = QRect(self._drag_start, end).normalized()
             if rect_w.width() > 4 and rect_w.height() > 4:
@@ -153,7 +238,6 @@ class ImageCanvas(QWidget):
             self.update()
 
     def get_selected_region(self) -> tuple[int, int, int, int] | None:
-        """選択中の領域を (x, y, w, h) で返す。未選択は None。"""
         if self._selected_rect and not self._selected_rect.isNull():
             r = self._selected_rect
             return (r.x(), r.y(), r.width(), r.height())
