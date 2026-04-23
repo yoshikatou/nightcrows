@@ -159,6 +159,25 @@ def _schedule_from_dict(d: dict[str, Any]) -> ScheduleEntry:
     )
 
 
+def save_watchers(watchers: list[Watcher], path: str) -> None:
+    """ウォッチャーリストをスタンドアロン JSON に保存。"""
+    out_dir = os.path.dirname(path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([_watcher_to_dict(w) for w in watchers], f,
+                  indent=2, ensure_ascii=False)
+
+
+def load_watchers(path: str) -> list[Watcher]:
+    """スタンドアロン JSON からウォッチャーリストを読み込む。"""
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return [_watcher_from_dict(d) for d in (data or [])]
+
+
 def save_flow(flow: Flow, path: str) -> None:
     data = {
         "name": flow.name,

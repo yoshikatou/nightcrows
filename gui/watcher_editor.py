@@ -1,6 +1,7 @@
 """ウォッチャー編集タブ。
 
-フロー JSON の watchers リストを GUI で編集する。
+watchers.json をフローとは独立して管理する。
+どのフローを実行中でも共通のウォッチャーが適用される。
 条件種別ごとにフォームを切り替え、ハンドラシーン・発火後動作を設定できる。
 """
 from __future__ import annotations
@@ -16,11 +17,12 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget,
 )
+# QLineEdit は _WatcherDialog 内の id_edit / handler_edit / whitelist_edit で使用
 
-from .flow import Condition, Flow, Watcher, load_flow, save_flow
+from .flow import Condition, Watcher, load_watchers, save_watchers
 from .ocr_test_dialog import OcrTestDialog
 
-FLOWS_DIR = "flows"
+WATCHERS_PATH = "watchers.json"
 SCENES_DIR = "scenes"
 TEMPLATES_DIR = "templates"
 
@@ -467,39 +469,36 @@ class _WatcherDialog(QDialog):
 
 # --------------------------------------------------------------- メインウィジェット
 class WatcherEditorWidget(QWidget):
-    """ウォッチャー一覧と編集を提供するタブウィジェット。"""
+    """ウォッチャー一覧と編集を提供するタブウィジェット。
+
+    フローとは独立して watchers.json を管理する。
+    ランナー起動時にこのファイルが自動的に読み込まれ、すべてのフローに適用される。
+    """
 
     def __init__(self, main_window) -> None:
         super().__init__()
         self._mw = main_window
-        self._flow: Flow | None = None
-        self._flow_path: str | None = None
+        self._watchers: list[Watcher] = []
         self._build_ui()
+        self._load_from_file()
 
     def _build_ui(self) -> None:
         lay = QVBoxLayout(self)
         lay.setSpacing(6)
 
-        # フロー選択バー
-        row = QHBoxLayout()
-        row.addWidget(QLabel("フロー:"))
-        self.path_edit = QLineEdit()
-        self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("flows/ 以下の .json を選択")
-        row.addWidget(self.path_edit, 1)
-        btn_open = QPushButton("開く")
-        btn_open.clicked.connect(self._open)
-        self.btn_save = QPushButton("保存")
-        self.btn_save.setEnabled(False)
+        # ヘッダー
+        hdr = QHBoxLayout()
+        title = QLabel(f"グローバルウォッチャー  （保存先: {WATCHERS_PATH}）")
+        title.setStyleSheet("font-weight: bold;")
+        hdr.addWidget(title, 1)
+        self.btn_save = QPushButton("💾 保存")
         self.btn_save.clicked.connect(self._save)
-        row.addWidget(btn_open)
-        row.addWidget(self.btn_save)
-        lay.addLayout(row)
+        hdr.addWidget(self.btn_save)
+        lay.addLayout(hdr)
 
-        # ヒント
         hint = QLabel(
-            "ウォッチャーは再生中、常時スクリーンショットを監視します。"
-            "条件が満たされるとハンドラシーンを実行します。"
+            "ここに登録したウォッチャーは、どのフローを実行中でも常時監視されます。\n"
+            "体力低下・ポーション残量・PVP攻撃などの共通監視をここで管理してください。"
         )
         hint.setStyleSheet("color: #555; font-size: 10px;")
         hint.setWordWrap(True)
@@ -512,17 +511,15 @@ class WatcherEditorWidget(QWidget):
 
         # 操作ボタン
         btn_row = QHBoxLayout()
-        self.btn_add  = QPushButton("＋ 追加")
-        self.btn_edit = QPushButton("✎ 編集")
-        self.btn_del  = QPushButton("✕ 削除")
-        self.btn_up   = QPushButton("↑")
-        self.btn_down = QPushButton("↓")
+        self.btn_add    = QPushButton("＋ 追加")
+        self.btn_edit   = QPushButton("✎ 編集")
+        self.btn_del    = QPushButton("✕ 削除")
+        self.btn_up     = QPushButton("↑")
+        self.btn_down   = QPushButton("↓")
         self.btn_toggle = QPushButton("有効/無効")
         for b in (self.btn_add, self.btn_edit, self.btn_del,
                   self.btn_up, self.btn_down, self.btn_toggle):
             btn_row.addWidget(b)
-            b.setEnabled(False)
-        self.btn_add.setEnabled(True)
         lay.addLayout(btn_row)
 
         self.btn_add.clicked.connect(self._add)
@@ -533,42 +530,37 @@ class WatcherEditorWidget(QWidget):
         self.btn_toggle.clicked.connect(self._toggle_enabled)
         self.list.currentRowChanged.connect(self._on_selection_changed)
         self.list.itemDoubleClicked.connect(lambda _: self._edit())
+        self._on_selection_changed(-1)
 
     # --------------------------------------------------------- ファイル操作
-    def _open(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "フロー選択", FLOWS_DIR, "JSON (*.json)"
-        )
-        if not path:
-            return
+    def _load_from_file(self) -> None:
         try:
-            flow = load_flow(path)
+            self._watchers = load_watchers(WATCHERS_PATH)
         except Exception as e:
-            QMessageBox.critical(self, "エラー", f"読込失敗: {e}")
-            return
-        self._flow = flow
-        self._flow_path = path
-        self.path_edit.setText(path)
-        self.btn_save.setEnabled(True)
-        self.btn_add.setEnabled(True)
+            QMessageBox.critical(self, "エラー", f"ウォッチャー読込失敗: {e}")
+            self._watchers = []
         self._refresh_list()
 
     def _save(self) -> None:
-        if not self._flow or not self._flow_path:
-            return
         try:
-            save_flow(self._flow, self._flow_path)
-            QMessageBox.information(self, "保存完了", "フローを保存しました")
+            save_watchers(self._watchers, WATCHERS_PATH)
+            QMessageBox.information(self, "保存完了",
+                                    f"ウォッチャーを保存しました\n({WATCHERS_PATH})")
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"保存失敗: {e}")
 
+    def get_watchers(self) -> list[Watcher]:
+        """ランナーが起動時に呼ぶ。有効なウォッチャーリストを返す。"""
+        return list(self._watchers)
+
     # --------------------------------------------------------- リスト更新
     def _refresh_list(self) -> None:
+        row = self.list.currentRow()
         self.list.clear()
-        if not self._flow:
-            return
-        for w in self._flow.watchers:
+        for w in self._watchers:
             self.list.addItem(self._make_item(w))
+        if row >= 0 and row < self.list.count():
+            self.list.setCurrentRow(row)
         self._on_selection_changed(self.list.currentRow())
 
     def _make_item(self, w: Watcher) -> QListWidgetItem:
@@ -595,70 +587,68 @@ class WatcherEditorWidget(QWidget):
         return item
 
     def _on_selection_changed(self, row: int) -> None:
-        has = row >= 0 and self._flow is not None
+        has = row >= 0
         for b in (self.btn_edit, self.btn_del,
                   self.btn_up, self.btn_down, self.btn_toggle):
             b.setEnabled(has)
 
     # --------------------------------------------------------- CRUD
     def _add(self) -> None:
-        if self._flow is None:
-            QMessageBox.information(self, "情報", "先にフローを開いてください")
-            return
         dlg = _WatcherDialog(parent=self)
         if dlg.exec() == QDialog.Accepted:
             w = dlg.result_watcher()
-            self._flow.watchers.append(w)
+            self._watchers.append(w)
             self.list.addItem(self._make_item(w))
+            self.list.setCurrentRow(self.list.count() - 1)
 
     def _edit(self) -> None:
         row = self.list.currentRow()
-        if row < 0 or not self._flow:
+        if row < 0:
             return
-        w = self._flow.watchers[row]
+        w = self._watchers[row]
         dlg = _WatcherDialog(watcher=w, parent=self)
         if dlg.exec() == QDialog.Accepted:
             new_w = dlg.result_watcher()
-            self._flow.watchers[row] = new_w
+            self._watchers[row] = new_w
             self.list.takeItem(row)
             self.list.insertItem(row, self._make_item(new_w))
             self.list.setCurrentRow(row)
 
     def _delete(self) -> None:
         row = self.list.currentRow()
-        if row < 0 or not self._flow:
+        if row < 0:
             return
-        w = self._flow.watchers[row]
+        w = self._watchers[row]
         if QMessageBox.question(
             self, "削除確認", f"ウォッチャー「{w.id}」を削除しますか？",
             QMessageBox.Yes | QMessageBox.No
         ) == QMessageBox.Yes:
-            self._flow.watchers.pop(row)
+            self._watchers.pop(row)
             self.list.takeItem(row)
 
     def _move_up(self) -> None:
         row = self.list.currentRow()
-        if row <= 0 or not self._flow:
+        if row <= 0:
             return
-        watchers = self._flow.watchers
-        watchers[row - 1], watchers[row] = watchers[row], watchers[row - 1]
+        self._watchers[row - 1], self._watchers[row] = \
+            self._watchers[row], self._watchers[row - 1]
         self._refresh_list()
         self.list.setCurrentRow(row - 1)
 
     def _move_down(self) -> None:
         row = self.list.currentRow()
-        if not self._flow or row < 0 or row >= len(self._flow.watchers) - 1:
+        if row < 0 or row >= len(self._watchers) - 1:
             return
-        watchers = self._flow.watchers
-        watchers[row], watchers[row + 1] = watchers[row + 1], watchers[row]
+        self._watchers[row], self._watchers[row + 1] = \
+            self._watchers[row + 1], self._watchers[row]
         self._refresh_list()
         self.list.setCurrentRow(row + 1)
 
     def _toggle_enabled(self) -> None:
         row = self.list.currentRow()
-        if row < 0 or not self._flow:
+        if row < 0:
             return
-        w = self._flow.watchers[row]
+        w = self._watchers[row]
         w.enabled = not w.enabled
         self.list.takeItem(row)
         self.list.insertItem(row, self._make_item(w))

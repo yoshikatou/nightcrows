@@ -118,6 +118,12 @@ class RunnerWidget(QWidget):
         if maintenance:
             self._log(f"メンテナンス登録: {len(maintenance)} 件")
 
+        # グローバルウォッチャーをフローに合算
+        global_watchers = self._mw.watcher_editor.get_watchers()
+        if global_watchers:
+            self._log(f"グローバルウォッチャー: {len(global_watchers)} 件")
+        flow.watchers = global_watchers + flow.watchers
+
         def run() -> None:
             try:
                 replay_flow(
