@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTime
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QPushButton, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget,
 )
 
 from .flow import Flow, ScheduleEntry, load_flow, save_flow
@@ -103,6 +103,81 @@ class _ScenePickerDialog(QDialog):
 
     def selected(self) -> str | None:
         return self._selected
+
+
+class _ScheduleEntryDialog(QDialog):
+    """時刻（1分単位）＋シーン選択ダイアログ。"""
+
+    def __init__(self, slot_time: str, scene: str = "", exact_time: str = "",
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("スケジュール設定")
+        self.setMinimumSize(400, 460)
+
+        lay = QVBoxLayout(self)
+
+        # 時刻入力
+        form = QFormLayout()
+        h, m = map(int, (exact_time or slot_time).split(":"))
+        self.time_edit = QTimeEdit(QTime(h, m))
+        self.time_edit.setDisplayFormat("HH:mm")
+        self.time_edit.setSingleStep(1)        # 1分単位
+        self.time_edit.setWrapping(True)
+        form.addRow("時刻:", self.time_edit)
+        lay.addLayout(form)
+
+        # シーン検索
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("絞り込み…")
+        self.search.textChanged.connect(self._filter)
+        lay.addWidget(self.search)
+
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(self._on_ok)
+        lay.addWidget(self.list, 1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._on_ok)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+        self._all: list[str] = []
+        self._load(scene)
+
+    def _load(self, preselect: str) -> None:
+        if os.path.isdir(SCENES_DIR):
+            for root, _, files in os.walk(SCENES_DIR):
+                for f in sorted(files):
+                    if f.endswith(".json"):
+                        rel = os.path.relpath(
+                            os.path.join(root, f), SCENES_DIR
+                        ).replace("\\", "/")
+                        self._all.append(rel)
+        self._filter("")
+        if preselect:
+            items = self.list.findItems(preselect, Qt.MatchExactly)
+            if items:
+                self.list.setCurrentItem(items[0])
+
+    def _filter(self, text: str) -> None:
+        self.list.clear()
+        for s in self._all:
+            if text.lower() in s.lower():
+                self.list.addItem(s)
+        if self.list.count() > 0 and self.list.currentRow() < 0:
+            self.list.setCurrentRow(0)
+
+    def _on_ok(self) -> None:
+        if not self.list.currentItem():
+            return
+        self.accept()
+
+    def get_values(self) -> tuple[str, str]:
+        """(exact_time "HH:MM", scene_path) を返す。"""
+        t = self.time_edit.time()
+        time_str = f"{t.hour():02d}:{t.minute():02d}"
+        scene = self.list.currentItem().text() if self.list.currentItem() else ""
+        return time_str, scene
 
 
 # ------------------------------------------------------------------ メイン
@@ -230,29 +305,35 @@ class FlowEditorWidget(QWidget):
             return
         for entry in self._flow.schedule:
             try:
-                row = TIME_SLOTS.index(entry.time)
+                h, m = map(int, entry.time.split(":"))
             except ValueError:
-                continue  # 30分境界でない時刻はスキップ
+                continue
+            row = (h * 60 + m) // _SLOT_MIN  # 任意の分を30分スロット行にマッピング
+            if row >= len(TIME_SLOTS):
+                continue
             if entry.repeat == "daily":
                 for col in range(7):
-                    self._set_cell(row, col, entry.target)
+                    self._set_cell(row, col, entry.target, entry.time)
             elif entry.repeat == "weekly":
                 for col in (entry.days or []):
                     if 0 <= col < 7:
-                        self._set_cell(row, col, entry.target)
+                        self._set_cell(row, col, entry.target, entry.time)
 
     def _clear_grid(self) -> None:
         for r in range(self.table.rowCount()):
             for c in range(7):
                 self.table.setItem(r, c, None)
 
-    def _set_cell(self, row: int, col: int, scene_path: str) -> None:
+    def _set_cell(self, row: int, col: int, scene_path: str,
+                  exact_time: str = "") -> None:
+        t = exact_time or TIME_SLOTS[row]
         name = os.path.basename(scene_path).removesuffix(".json")
-        item = QTableWidgetItem(name)
+        item = QTableWidgetItem(f"{t} {name}")
         item.setData(Qt.UserRole, scene_path)
+        item.setData(Qt.UserRole + 1, t)
         item.setBackground(QBrush(_cell_color(scene_path)))
         item.setTextAlignment(Qt.AlignCenter)
-        item.setToolTip(scene_path)
+        item.setToolTip(f"{t}  {scene_path}")
         self.table.setItem(row, col, item)
 
     def _grid_to_schedule(self) -> list[ScheduleEntry]:
@@ -262,9 +343,10 @@ class FlowEditorWidget(QWidget):
                 item = self.table.item(row, col)
                 if item:
                     path = item.data(Qt.UserRole)
+                    exact_time = item.data(Qt.UserRole + 1) or TIME_SLOTS[row]
                     if path:
                         entries.append(ScheduleEntry(
-                            time=TIME_SLOTS[row],
+                            time=exact_time,
                             target=path,
                             repeat="weekly",
                             days=[col],
@@ -276,11 +358,17 @@ class FlowEditorWidget(QWidget):
         if not self._flow:
             QMessageBox.information(self, "情報", "先にフローを開くか新規作成してください")
             return
-        dlg = _ScenePickerDialog(parent=self)
+        existing = self.table.item(row, col)
+        dlg = _ScheduleEntryDialog(
+            slot_time=TIME_SLOTS[row],
+            scene=existing.data(Qt.UserRole) if existing else "",
+            exact_time=existing.data(Qt.UserRole + 1) if existing else "",
+            parent=self,
+        )
         if dlg.exec() == QDialog.Accepted:
-            scene = dlg.selected()
+            exact_time, scene = dlg.get_values()
             if scene:
-                self._set_cell(row, col, scene)
+                self._set_cell(row, col, scene, exact_time)
 
     def _on_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
