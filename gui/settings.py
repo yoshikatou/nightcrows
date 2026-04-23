@@ -17,6 +17,7 @@ class Device:
 @dataclass
 class AppSettings:
     devices: list[Device] = field(default_factory=list)
+    tesseract_cmd: str = ""   # 空 = PATH から自動検出
 
 
 def _default_settings() -> AppSettings:
@@ -59,11 +60,17 @@ def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
         dev = _parse_device(d)
         if dev:
             devices.append(dev)
-    return AppSettings(devices=devices)
+    return AppSettings(
+        devices=devices,
+        tesseract_cmd=data.get("tesseract_cmd", ""),
+    )
 
 
 def save_settings(s: AppSettings, path: str = SETTINGS_PATH) -> None:
-    data = {"devices": [{"label": d.label, "ip": d.ip} for d in s.devices]}
+    data = {
+        "devices": [{"label": d.label, "ip": d.ip} for d in s.devices],
+        "tesseract_cmd": s.tesseract_cmd,
+    }
     out_dir = os.path.dirname(path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)

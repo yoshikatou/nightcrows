@@ -32,6 +32,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 860)
 
         self.settings: AppSettings = load_settings()
+        self._apply_tesseract_cmd(self.settings.tesseract_cmd)
         self.current_serial: str | None = None
         self.connect_stop = threading.Event()
         self.scrcpy_proc: subprocess.Popen | None = None
@@ -247,6 +248,15 @@ class MainWindow(QMainWindow):
         else:
             self._set_connected(None)
 
+    @staticmethod
+    def _apply_tesseract_cmd(cmd: str) -> None:
+        try:
+            import pytesseract
+            if cmd:
+                pytesseract.pytesseract.tesseract_cmd = cmd
+        except ImportError:
+            pass
+
     def _open_settings(self) -> None:
         dlg = DeviceSettingsDialog(self.settings, parent=self)
         if dlg.exec() == dlg.Accepted:
@@ -255,8 +265,9 @@ class MainWindow(QMainWindow):
                 return
             self.settings = new_settings
             save_settings(self.settings)
+            self._apply_tesseract_cmd(self.settings.tesseract_cmd)
             self._reload_device_combo()
-            self.scene_editor._log("デバイス設定を更新")
+            self.scene_editor._log("設定を更新")
 
     # ------------------------------------------------------------ shutdown
     def closeEvent(self, event):

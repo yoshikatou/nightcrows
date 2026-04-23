@@ -1,8 +1,9 @@
-"""デバイス一覧（ラベル + IP）を編集するダイアログ。"""
+"""デバイス一覧（ラベル + IP）と外部ツールパスを編集するダイアログ。"""
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QMessageBox,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
@@ -13,8 +14,8 @@ from .settings import AppSettings, Device
 class DeviceSettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("デバイス設定")
-        self.resize(520, 360)
+        self.setWindowTitle("設定")
+        self.resize(560, 440)
 
         self._table = QTableWidget(0, 2)
         self._table.setHorizontalHeaderLabels(["ラベル", "IP"])
@@ -42,9 +43,29 @@ class DeviceSettingsDialog(QDialog):
         buttons.accepted.connect(self._on_ok)
         buttons.rejected.connect(self.reject)
 
+        # Tesseract パス設定
+        grp_tools = QGroupBox("外部ツール")
+        tools_lay = QFormLayout(grp_tools)
+        tess_row = QHBoxLayout()
+        self._tess_edit = QLineEdit(settings.tesseract_cmd)
+        self._tess_edit.setPlaceholderText(
+            r"例: C:\Program Files\Tesseract-OCR\tesseract.exe  （空欄 = PATH から自動検出）"
+        )
+        btn_tess = QPushButton("参照")
+        btn_tess.setFixedWidth(50)
+        btn_tess.clicked.connect(self._browse_tesseract)
+        tess_row.addWidget(self._tess_edit, 1)
+        tess_row.addWidget(btn_tess)
+        tools_lay.addRow("Tesseract 実行ファイル:", tess_row)
+        hint = QLabel("OCRウォッチャーを使う場合に指定。インストール先の tesseract.exe を選択してください。")
+        hint.setStyleSheet("color: #555; font-size: 9px;")
+        hint.setWordWrap(True)
+        tools_lay.addRow("", hint)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self._table)
         layout.addLayout(row)
+        layout.addWidget(grp_tools)
         layout.addWidget(buttons)
 
         self._result: AppSettings | None = None
@@ -78,6 +99,14 @@ class DeviceSettingsDialog(QDialog):
         else:
             self._append_row(ip, ip)
 
+    def _browse_tesseract(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "tesseract.exe を選択", r"C:\Program Files\Tesseract-OCR",
+            "実行ファイル (*.exe)"
+        )
+        if path:
+            self._tess_edit.setText(path)
+
     def _cell(self, r: int, c: int) -> str:
         item = self._table.item(r, c)
         return (item.text() if item else "").strip()
@@ -92,7 +121,10 @@ class DeviceSettingsDialog(QDialog):
                                     f"{r + 1} 行目: ラベルと IP は必須です")
                 return
             devices.append(Device(label=label, ip=ip))
-        self._result = AppSettings(devices=devices)
+        self._result = AppSettings(
+            devices=devices,
+            tesseract_cmd=self._tess_edit.text().strip(),
+        )
         self.accept()
 
     def result_settings(self) -> AppSettings | None:
