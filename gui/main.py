@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .adb import adb_disconnect, discover_and_connect
+from .flow_editor import FlowEditorWidget
 from .maintenance_dialog import MaintenanceDialog
 from .runner_widget import RunnerWidget
 from .scene_editor import SceneEditorWidget
@@ -82,22 +83,14 @@ class MainWindow(QMainWindow):
         # タブ
         self.tabs = QTabWidget()
         self.scene_editor = SceneEditorWidget(self)
+        self.flow_editor = FlowEditorWidget(self)
         self.runner = RunnerWidget(self)
         self.tabs.addTab(self.scene_editor, "シーン編集")
-        self.tabs.addTab(self._build_flow_placeholder(), "フロー編集")
+        self.tabs.addTab(self.flow_editor, "フロー編集")
         self.tabs.addTab(self.runner, "ランナー")
         root.addWidget(self.tabs, 1)
 
         self.setCentralWidget(central)
-
-    def _build_flow_placeholder(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        label = QLabel("フロー編集（未実装）\n\n複数シーンの繋ぎ方・時刻スケジュール・監視ルールを編集するタブ")
-        label.setStyleSheet("padding: 40px;")
-        lay.addWidget(label)
-        lay.addStretch(1)
-        return w
 
     # ----------------------------------------------------------- exposed API
     def current_ip(self) -> str:
