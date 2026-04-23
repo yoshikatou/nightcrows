@@ -7,7 +7,7 @@ import threading
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         dlg = DeviceSettingsDialog(self.settings, parent=self)
-        if dlg.exec() == dlg.Accepted:
+        if dlg.exec() == QDialog.Accepted:
             new_settings = dlg.result_settings()
             if new_settings is None:
                 return
