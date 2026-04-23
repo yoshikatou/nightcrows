@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (
     QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from .adb import adb_disconnect, discover_and_connect
+import subprocess
+from .adb import adb_disconnect, adb_ping, discover_and_connect, launch_scrcpy
 from .flow_editor import FlowEditorWidget
 from .maintenance_dialog import MaintenanceDialog
 from .runner_widget import RunnerWidget
@@ -32,6 +33,7 @@ class MainWindow(QMainWindow):
         self.settings: AppSettings = load_settings()
         self.current_serial: str | None = None
         self.connect_stop = threading.Event()
+        self.scrcpy_proc: subprocess.Popen | None = None
 
         self._build_ui()
         self._reload_device_combo()
@@ -63,6 +65,9 @@ class MainWindow(QMainWindow):
         self.btn_disconnect.setEnabled(False)
         self.btn_disconnect.clicked.connect(self._adb_disconnect)
         bar.addWidget(self.btn_disconnect)
+        self.btn_scrcpy = QPushButton("scrcpy 起動")
+        self.btn_scrcpy.clicked.connect(self._toggle_scrcpy)
+        bar.addWidget(self.btn_scrcpy)
         btn_maintenance = QPushButton("🔧 メンテ")
         btn_maintenance.clicked.connect(self._open_maintenance)
         bar.addWidget(btn_maintenance)
@@ -114,6 +119,33 @@ class MainWindow(QMainWindow):
         self.clock_label.setText(
             now.strftime(f"%Y-%m-%d（{wd}）%H:%M:%S")
         )
+
+    def _toggle_scrcpy(self) -> None:
+        if self.scrcpy_proc and self.scrcpy_proc.poll() is None:
+            try:
+                self.scrcpy_proc.terminate()
+                try:
+                    self.scrcpy_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.scrcpy_proc.kill()
+            except Exception:
+                pass
+            self.scrcpy_proc = None
+            self.btn_scrcpy.setText("scrcpy 起動")
+            self.scene_editor._log("scrcpy 停止")
+            if self.current_serial and not adb_ping(self.current_serial, timeout=2):
+                self.scene_editor._log(f"  adb 応答なし -> 未接続扱いに: {self.current_serial}")
+                self._set_connected(None)
+            return
+        if not self.current_serial:
+            QMessageBox.information(self, "情報", "先にデバイスに接続してください")
+            return
+        try:
+            self.scrcpy_proc = launch_scrcpy(self.current_serial)
+            self.btn_scrcpy.setText("scrcpy 停止")
+            self.scene_editor._log(f"scrcpy 起動: {self.current_serial}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"scrcpy 起動失敗: {e}")
 
     def _open_maintenance(self) -> None:
         MaintenanceDialog(parent=self).exec()
@@ -225,6 +257,11 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ shutdown
     def closeEvent(self, event):
+        if self.scrcpy_proc and self.scrcpy_proc.poll() is None:
+            try:
+                self.scrcpy_proc.terminate()
+            except Exception:
+                pass
         self.scene_editor.shutdown()
         self.runner.shutdown()
         super().closeEvent(event)

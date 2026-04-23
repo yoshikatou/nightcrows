@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import threading
 from datetime import datetime
 
@@ -14,7 +13,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from .adb import get_rotation_and_size, launch_scrcpy, adb_ping, screencap
+from .adb import get_rotation_and_size, screencap
 from .canvas import SnapshotCanvas
 from .recorder import TapRecorder
 from .replay import replay_scene
@@ -39,7 +38,6 @@ class SceneEditorWidget(QWidget):
         self._mw = main_window
         self.scene = Scene()
         self.current_scene_path: str | None = None
-        self.scrcpy_proc: subprocess.Popen | None = None
         self.replay_thread: threading.Thread | None = None
         self.replay_stop = threading.Event()
         self.recorder: TapRecorder | None = None
@@ -65,13 +63,23 @@ class SceneEditorWidget(QWidget):
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
 
+        # ---- 左カラム: キャンバス（stretch）+ ログ（固定高） ----
+        left = QVBoxLayout()
         self.canvas = SnapshotCanvas()
         self.canvas.clicked.connect(self._on_canvas_click)
         self.canvas.region_selected.connect(self._on_canvas_region)
         self.canvas.marker_moved.connect(self._on_marker_moved)
         self.canvas.right_clicked.connect(self._on_canvas_right_click)
-        root.addWidget(self.canvas, 3)
+        left.addWidget(self.canvas, 1)
 
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(1000)
+        self.log_view.setFixedHeight(120)
+        left.addWidget(self.log_view)
+        root.addLayout(left, 3)
+
+        # ---- 右カラム: 操作パネル ----
         right = QVBoxLayout()
 
         # シーン名
@@ -82,92 +90,66 @@ class SceneEditorWidget(QWidget):
         row_sn.addWidget(self.scene_name_edit, 1)
         right.addLayout(row_sn)
 
-        # シーンファイル
-        row3 = QHBoxLayout()
-        btn_new = QPushButton("新規")
-        btn_new.clicked.connect(self._new_scene)
-        btn_save = QPushButton("保存")
-        btn_save.clicked.connect(self._save_scene)
-        btn_save_as = QPushButton("別名保存")
-        btn_save_as.clicked.connect(self._save_scene_as)
-        btn_load = QPushButton("読込")
-        btn_load.clicked.connect(self._load_scene)
-        for b in (btn_new, btn_save, btn_save_as, btn_load):
-            row3.addWidget(b)
-        right.addLayout(row3)
+        # シーンファイル操作
+        row_file = QHBoxLayout()
+        for label, slot in [("新規", self._new_scene), ("保存", self._save_scene),
+                             ("別名保存", self._save_scene_as), ("読込", self._load_scene)]:
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            row_file.addWidget(b)
+        right.addLayout(row_file)
 
-        # scrcpy / スナップ更新
-        row2 = QHBoxLayout()
-        self.btn_scrcpy = QPushButton("scrcpy 起動")
-        self.btn_scrcpy.clicked.connect(self._toggle_scrcpy)
-        row2.addWidget(self.btn_scrcpy)
-        btn_snap_update = QPushButton("スナップ更新")
-        btn_snap_update.clicked.connect(self._add_snapshot_step)
-        row2.addWidget(btn_snap_update)
-        right.addLayout(row2)
-
-        # 記録
-        row_rec = QHBoxLayout()
-        self.btn_rec_start = QPushButton("● 記録開始")
-        self.btn_rec_start.clicked.connect(self._start_recording)
-        self.btn_rec_stop = QPushButton("■ 記録停止")
-        self.btn_rec_stop.clicked.connect(self._stop_recording)
-        self.btn_rec_stop.setEnabled(False)
-        row_rec.addWidget(self.btn_rec_start)
-        row_rec.addWidget(self.btn_rec_stop)
-        right.addLayout(row_rec)
+        # スナップ更新 + 記録トグル
+        row_snap = QHBoxLayout()
+        btn_snap = QPushButton("📷 スナップ更新")
+        btn_snap.clicked.connect(self._add_snapshot_step)
+        row_snap.addWidget(btn_snap)
+        self.btn_rec_toggle = QPushButton("● 記録開始")
+        self.btn_rec_toggle.clicked.connect(self._toggle_recording)
+        row_snap.addWidget(self.btn_rec_toggle)
+        right.addLayout(row_snap)
 
         # ステップ一覧
-        right.addWidget(QLabel("ステップ（行選択でスナップ切替・マーカー強調）:"))
+        right.addWidget(QLabel("ステップ:"))
         self.step_list = QListWidget()
         self.step_list.setDragDropMode(QListWidget.InternalMove)
         self.step_list.model().rowsMoved.connect(self._on_steps_reordered)
         self.step_list.currentRowChanged.connect(self._on_step_row_changed)
-        right.addWidget(self.step_list, 2)
+        right.addWidget(self.step_list, 1)
 
-        row4 = QHBoxLayout()
-        btn_add_wait = QPushButton("固定待ち 1s 追加")
-        btn_add_wait.clicked.connect(self._add_wait_fixed)
-        btn_add_scroll = QPushButton("自動スクロール追加")
-        btn_add_scroll.clicked.connect(self._add_scroll)
-        btn_del = QPushButton("選択ステップ削除")
+        # ステップ追加・削除
+        row_add = QHBoxLayout()
+        for label, slot in [("固定待ち", self._add_wait_fixed),
+                             ("スクロール", self._add_scroll),
+                             ("シーン取込", self._import_scene),
+                             ("グループ", self._add_group_header)]:
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            row_add.addWidget(b)
+        right.addLayout(row_add)
+
+        row_move = QHBoxLayout()
+        btn_del = QPushButton("削除")
         btn_del.clicked.connect(self._del_step)
-        row4.addWidget(btn_add_wait)
-        row4.addWidget(btn_add_scroll)
-        row4.addWidget(btn_del)
-        right.addLayout(row4)
-
-        row4b = QHBoxLayout()
-        btn_import = QPushButton("シーンを取り込む")
-        btn_import.clicked.connect(self._import_scene)
-        btn_group = QPushButton("グループ追加")
-        btn_group.clicked.connect(self._add_group_header)
-        btn_up = QPushButton("↑ 上へ")
+        btn_up = QPushButton("↑")
         btn_up.clicked.connect(self._move_step_up)
-        btn_down = QPushButton("↓ 下へ")
+        btn_down = QPushButton("↓")
         btn_down.clicked.connect(self._move_step_down)
-        row4b.addWidget(btn_import)
-        row4b.addWidget(btn_group)
-        row4b.addWidget(btn_up)
-        row4b.addWidget(btn_down)
-        right.addLayout(row4b)
+        for b in (btn_del, btn_up, btn_down):
+            row_move.addWidget(b)
+        row_move.addStretch()
+        right.addLayout(row_move)
 
         # 再生
-        row5 = QHBoxLayout()
-        self.btn_replay = QPushButton("再生")
+        row_play = QHBoxLayout()
+        self.btn_replay = QPushButton("▶ 再生")
         self.btn_replay.clicked.connect(self._start_replay)
-        self.btn_stop_replay = QPushButton("停止")
+        self.btn_stop_replay = QPushButton("■ 停止")
         self.btn_stop_replay.clicked.connect(self._stop_replay)
         self.btn_stop_replay.setEnabled(False)
-        row5.addWidget(self.btn_replay)
-        row5.addWidget(self.btn_stop_replay)
-        right.addLayout(row5)
-
-        right.addWidget(QLabel("ログ:"))
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(1000)
-        right.addWidget(self.log_view, 1)
+        row_play.addWidget(self.btn_replay)
+        row_play.addWidget(self.btn_stop_replay)
+        right.addLayout(row_play)
 
         root.addLayout(right, 2)
 
@@ -197,36 +179,6 @@ class SceneEditorWidget(QWidget):
     def _on_scene_name_changed(self, text: str) -> None:
         self.scene.name = text
         self.scene_path_changed.emit(self.current_scene_path or "")
-
-    # -------------------------------------------------------------- scrcpy
-    def _toggle_scrcpy(self) -> None:
-        if self.scrcpy_proc and self.scrcpy_proc.poll() is None:
-            try:
-                self.scrcpy_proc.terminate()
-                try:
-                    self.scrcpy_proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.scrcpy_proc.kill()
-            except Exception:
-                pass
-            self.scrcpy_proc = None
-            self.btn_scrcpy.setText("scrcpy 起動")
-            self._log("scrcpy 停止")
-            # scrcpy 停止で adb 接続が巻き添えで死んでいる場合があるので検証
-            cur = self._mw.current_serial
-            if cur and not adb_ping(cur, timeout=2):
-                self._log(f"  adb 応答なし -> 未接続扱いに: {cur}")
-                self._mw.set_connected(None)
-            return
-        serial = self._require_connected()
-        if not serial:
-            return
-        try:
-            self.scrcpy_proc = launch_scrcpy(serial)
-            self.btn_scrcpy.setText("scrcpy 停止")
-            self._log(f"scrcpy 起動: {serial}")
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"scrcpy 起動失敗: {e}")
 
     # ---------------------------------------------------------- snapshot step
     def _add_snapshot_step(self) -> None:
@@ -518,6 +470,12 @@ class SceneEditorWidget(QWidget):
         self.canvas.set_markers(markers)
 
     # -------------------------------------------------------------- recording
+    def _toggle_recording(self) -> None:
+        if self.recorder and self.recorder.is_running():
+            self._stop_recording()
+        else:
+            self._start_recording()
+
     def _start_recording(self) -> None:
         serial = self._require_connected()
         if not serial:
@@ -543,8 +501,10 @@ class SceneEditorWidget(QWidget):
         self.recorder.error.connect(self.rec_error_signal.emit)
         self.recorder.start()
 
-        self.btn_rec_start.setEnabled(False)
-        self.btn_rec_stop.setEnabled(True)
+        self.btn_rec_toggle.setText("■ 記録停止")
+        self.btn_rec_toggle.setStyleSheet(
+            "QPushButton { background-color: #c62828; color: white; font-weight: bold; }"
+        )
         self._log("タップ記録開始")
 
     def _stop_recording(self) -> None:
@@ -563,8 +523,8 @@ class SceneEditorWidget(QWidget):
         self._log(f"記録: tap ({x},{y}) dur={duration_ms}ms gap={gap_s:.2f}s")
 
     def _on_rec_stopped(self) -> None:
-        self.btn_rec_start.setEnabled(True)
-        self.btn_rec_stop.setEnabled(False)
+        self.btn_rec_toggle.setText("● 記録開始")
+        self.btn_rec_toggle.setStyleSheet("")
         self._log("タップ記録終了")
 
     def _on_rec_error(self, msg: str) -> None:
@@ -676,8 +636,3 @@ class SceneEditorWidget(QWidget):
         self.replay_stop.set()
         if self.recorder:
             self.recorder.stop()
-        if self.scrcpy_proc and self.scrcpy_proc.poll() is None:
-            try:
-                self.scrcpy_proc.terminate()
-            except Exception:
-                pass
