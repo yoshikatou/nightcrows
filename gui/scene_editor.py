@@ -137,10 +137,13 @@ class SceneEditorWidget(QWidget):
         right.addLayout(row4)
 
         row4b = QHBoxLayout()
+        btn_call = QPushButton("サブシーン追加")
+        btn_call.clicked.connect(self._add_call_scene)
         btn_up = QPushButton("↑ 上へ")
         btn_up.clicked.connect(self._move_step_up)
         btn_down = QPushButton("↓ 下へ")
         btn_down.clicked.connect(self._move_step_down)
+        row4b.addWidget(btn_call)
         row4b.addWidget(btn_up)
         row4b.addWidget(btn_down)
         right.addLayout(row4b)
@@ -344,6 +347,18 @@ class SceneEditorWidget(QWidget):
         self._refresh_step_list()
         self.step_list.setCurrentRow(row + 1)
 
+    def _add_call_scene(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "呼び出すシーンを選択", SCENES_DIR, "JSON (*.json)"
+        )
+        if not path:
+            return
+        path = os.path.normpath(path).replace("\\", "/")
+        step = Step(type="call_scene", params={"scene": path})
+        self.scene.steps.append(step)
+        self._refresh_step_list(select_last=True)
+        self._log(f"call_scene 追加: {path}")
+
     def _on_marker_moved(self, marker_idx: int, lx: int, ly: int) -> None:
         if marker_idx < 0 or marker_idx >= len(self._marker_step_indices):
             return
@@ -380,6 +395,10 @@ class SceneEditorWidget(QWidget):
                          f"→({p.get('x2')}±{p.get('x2_jitter',0)},"
                          f"{p.get('y2')}±{p.get('y2_jitter',0)}) "
                          f"{p.get('duration_ms')}±{p.get('duration_jitter_ms',0)}ms")
+            elif s.type == "call_scene":
+                sub = s.params.get("scene", "")
+                name = os.path.splitext(os.path.basename(sub))[0] if sub else "(未設定)"
+                label = f"{i + 1}. → {name}  [{sub}]"
             else:
                 label = f"{i + 1}. {s.type}  {s.params}"
             self.step_list.addItem(label)

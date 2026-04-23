@@ -11,6 +11,20 @@
 - Python 3.10 環境に `.venv/` を作成し、`requirements.txt` 依存をインストール
 - `numpy>=2.4` が Python 3.10 では存在しないため `numpy>=1.26` に緩和（numpy 2.2.6 が入る）
 
+### シーンの親子構造（call_scene ステップ）
+
+- `call_scene` ステップ型を追加。子シーンから親シーン（共通処理）を呼び出せる
+  - JSON: `{"type": "call_scene", "scene": "scenes/main/open_menu.json"}`
+  - 再帰深度 10 で循環参照を防止
+- `replay.py`: `call_scene` を再帰的に `replay_scene` で実行する `_do_call_scene` を追加
+- `scene_editor.py`: 「サブシーン追加」ボタンでファイル選択 → ステップ末尾に追加
+  - ステップリスト表示: `→ open_menu  [scenes/main/open_menu.json]`
+
+**使い方イメージ:**
+- `open_menu.json` (親): メニューを開く共通手順
+- `go_to_dungeon.json` (子): ステップ1 = `call_scene: open_menu.json`、以降ダンジョン移動手順
+- `open_bag.json` (子): ステップ1 = `call_scene: open_menu.json`、以降バッグ操作手順
+
 ### フロー編集タブ：TV番組表スタイルの週間スケジュールエディタ
 
 - `gui/flow_editor.py` を新規作成。「フロー編集タブ」のプレースホルダーを置き換え

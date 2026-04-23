@@ -9,16 +9,20 @@ import cv2
 import numpy as np
 
 from .adb import input_swipe, screencap
-from .scene import Scene, Step
+from .scene import Scene, Step, load_scene
 
 
 LogFn = Callable[[str], None]
 StopFn = Callable[[], bool]
 
 
+_MAX_CALL_DEPTH = 10
+
+
 def replay_scene(scene: Scene, serial: str,
                  log: LogFn = print,
-                 should_stop: StopFn = lambda: False) -> None:
+                 should_stop: StopFn = lambda: False,
+                 _depth: int = 0) -> None:
     for i, step in enumerate(scene.steps):
         if should_stop():
             log("中断")
@@ -42,11 +46,29 @@ def replay_scene(scene: Scene, serial: str,
                 log("wait_image タイムアウト - 中断")
                 return
         elif step.type == "snapshot":
-            # 参照画像の切替用ステップ。再生時は no-op。
             pass
+        elif step.type == "call_scene":
+            _do_call_scene(step, serial, log, should_stop, _depth)
         else:
             log(f"未知のステップ型: {step.type}")
     log("完了")
+
+
+def _do_call_scene(step: Step, serial: str, log: LogFn,
+                   should_stop: StopFn, depth: int) -> None:
+    sub_path = step.params.get("scene", "").strip()
+    if not sub_path:
+        log("call_scene: scene パスが空")
+        return
+    if depth >= _MAX_CALL_DEPTH:
+        log(f"call_scene: 最大深度 ({_MAX_CALL_DEPTH}) に達したためスキップ: {sub_path}")
+        return
+    try:
+        sub = load_scene(sub_path)
+        log(f"  → サブシーン [{sub.name}]")
+        replay_scene(sub, serial, log=log, should_stop=should_stop, _depth=depth + 1)
+    except Exception as e:
+        log(f"  サブシーン読込失敗: {sub_path}: {e}")
 
 
 def _jitter(base: int, jitter: int) -> int:
