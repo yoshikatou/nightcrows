@@ -599,8 +599,20 @@ class WatcherEditorWidget(QWidget):
                   self.btn_up, self.btn_down, self.btn_toggle):
             b.setEnabled(has)
 
+    def _require_connected(self) -> bool:
+        if not self._mw.current_serial:
+            QMessageBox.information(
+                self, "デバイス未接続",
+                "スクショ取得にはデバイスの接続が必要です。\n"
+                "先にデバイスに『接続』してください。"
+            )
+            return False
+        return True
+
     # --------------------------------------------------------- CRUD
     def _add(self) -> None:
+        if not self._require_connected():
+            return
         dlg = _WatcherWizard(serial=self._mw.current_serial, parent=self)
         if dlg.exec() == QDialog.Accepted:
             w = dlg.result_watcher()
@@ -612,6 +624,8 @@ class WatcherEditorWidget(QWidget):
     def _edit(self) -> None:
         row = self.list.currentRow()
         if row < 0:
+            return
+        if not self._require_connected():
             return
         dlg = _WatcherWizard(serial=self._mw.current_serial,
                               watcher=self._watchers[row], parent=self)
