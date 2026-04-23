@@ -301,10 +301,10 @@ class _WatcherDialog(QDialog):
 
         form = QFormLayout()
 
-        # ID / 有効
-        self.id_edit = QLineEdit()
-        self.id_edit.setPlaceholderText("自動生成（空白で OK）")
-        form.addRow("ID:", self.id_edit)
+        # タイトル（必須）
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("例: ポーション低下、体力ピンチ、PVP攻撃")
+        form.addRow("タイトル (必須):", self.title_edit)
 
         self.enabled_check = QCheckBox("有効")
         self.enabled_check.setChecked(True)
@@ -417,7 +417,7 @@ class _WatcherDialog(QDialog):
             self.handler_edit.setText(rel)
 
     def _load(self, w: Watcher) -> None:
-        self.id_edit.setText(w.id)
+        self.title_edit.setText(w.title)
         self.enabled_check.setChecked(w.enabled)
         self.priority_spin.setValue(w.priority)
 
@@ -441,10 +441,14 @@ class _WatcherDialog(QDialog):
         self.cooldown_spin.setValue(w.cooldown_s)
 
     def _on_ok(self) -> None:
+        if not self.title_edit.text().strip():
+            QMessageBox.warning(self, "入力エラー", "タイトルは必須です")
+            self.title_edit.setFocus()
+            return
         self.accept()
 
     def result_watcher(self) -> Watcher:
-        wid = self.id_edit.text().strip() or str(uuid.uuid4())[:8]
+        wid = str(uuid.uuid4())[:8]
         ctype = self.cond_combo.currentData()
         if ctype == "image_appear":
             cond = self.form_appear.to_condition("image_appear")
@@ -457,6 +461,7 @@ class _WatcherDialog(QDialog):
 
         return Watcher(
             id=wid,
+            title=self.title_edit.text().strip(),
             enabled=self.enabled_check.isChecked(),
             priority=self.priority_spin.value(),
             condition=cond,
@@ -570,8 +575,9 @@ class WatcherEditorWidget(QWidget):
         handler_name = (
             os.path.basename(w.handler).removesuffix(".json") if w.handler else "（なし）"
         )
+        display_title = w.title or w.id
         text = (
-            f"[{'✓' if w.enabled else '✗'}]  {w.id}  |  {cond_label}"
+            f"[{'✓' if w.enabled else '✗'}]  {display_title}  |  {cond_label}"
             f"\n      → {handler_name}  /  {after_label}"
             f"  /  優先度:{w.priority}  冷却:{w.cooldown_s:.0f}s"
         )
@@ -620,7 +626,7 @@ class WatcherEditorWidget(QWidget):
             return
         w = self._watchers[row]
         if QMessageBox.question(
-            self, "削除確認", f"ウォッチャー「{w.id}」を削除しますか？",
+            self, "削除確認", f"ウォッチャー「{w.title or w.id}」を削除しますか？",
             QMessageBox.Yes | QMessageBox.No
         ) == QMessageBox.Yes:
             self._watchers.pop(row)

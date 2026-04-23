@@ -43,6 +43,7 @@ class Condition:
 @dataclass
 class Watcher:
     id: str = ""
+    title: str = ""                  # 表示名（必須）例: "ポーション低下"
     enabled: bool = True
     priority: int = 0
     condition: Condition = field(default_factory=Condition)
@@ -113,6 +114,7 @@ def _cond_from_dict(d: dict[str, Any]) -> Condition:
 def _watcher_to_dict(w: Watcher) -> dict[str, Any]:
     return {
         "id": w.id,
+        "title": w.title,
         "enabled": w.enabled,
         "priority": w.priority,
         "condition": _cond_to_dict(w.condition),
@@ -126,6 +128,7 @@ def _watcher_to_dict(w: Watcher) -> dict[str, Any]:
 def _watcher_from_dict(d: dict[str, Any]) -> Watcher:
     return Watcher(
         id=d.get("id", ""),
+        title=d.get("title", ""),
         enabled=bool(d.get("enabled", True)),
         priority=int(d.get("priority", 0)),
         condition=_cond_from_dict(d.get("condition", {})),
