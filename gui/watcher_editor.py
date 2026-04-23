@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .flow import Condition, Flow, Watcher, load_flow, save_flow
+from .ocr_test_dialog import OcrTestDialog
 
 FLOWS_DIR = "flows"
 SCENES_DIR = "scenes"
@@ -26,7 +27,8 @@ TEMPLATES_DIR = "templates"
 _COND_LABELS = {
     "image_appear": "画像が出現したとき",
     "image_gone":   "画像が消えたとき",
-    "digit_threshold": "数字が閾値を超えたとき（ポーション残量など）",
+    "digit_threshold": "数字が閾値を超えたとき（テンプレマッチ）",
+    "ocr_number":   "数字が閾値を超えたとき（OCR — ポーション残量・HP など）",
 }
 
 _AFTER_LABELS = {
@@ -211,6 +213,78 @@ class _DigitConditionForm(QWidget):
         )
 
 
+class _OcrConditionForm(QWidget):
+    """ocr_number フォーム — Tesseract OCR で数値を読む。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        lay = QFormLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        # Region
+        rh = QHBoxLayout()
+        self.rx = QSpinBox(); self.rx.setRange(0, 9999); self.rx.setPrefix("x:")
+        self.ry = QSpinBox(); self.ry.setRange(0, 9999); self.ry.setPrefix("y:")
+        self.rw = QSpinBox(); self.rw.setRange(0, 9999); self.rw.setPrefix("w:")
+        self.rh_spin = QSpinBox(); self.rh_spin.setRange(0, 9999); self.rh_spin.setPrefix("h:")
+        for sp in (self.rx, self.ry, self.rw, self.rh_spin):
+            rh.addWidget(sp)
+        lay.addRow("読み取り領域:", rh)
+
+        hint = QLabel("※「🔬 OCR テスト」ボタンでスクショから範囲を選択して自動入力できます")
+        hint.setStyleSheet("color: #666; font-size: 9px;")
+        hint.setWordWrap(True)
+        lay.addRow("", hint)
+
+        # 文字種ホワイトリスト
+        self.whitelist_edit = QLineEdit("0123456789")
+        self.whitelist_edit.setPlaceholderText("例: 0123456789 （空白=制限なし）")
+        lay.addRow("文字種:", self.whitelist_edit)
+
+        # op / value
+        hv = QHBoxLayout()
+        self.op_combo = QComboBox()
+        for op in ("<", "<=", ">", ">=", "=="):
+            self.op_combo.addItem(op, op)
+        hv.addWidget(self.op_combo)
+        self.value_spin = QSpinBox()
+        self.value_spin.setRange(0, 99999)
+        hv.addWidget(self.value_spin)
+        hv.addStretch()
+        lay.addRow("発火条件（数値）:", hv)
+
+    def get_region(self) -> list[int] | None:
+        w = self.rw.value(); h = self.rh_spin.value()
+        if w <= 0 or h <= 0:
+            return None
+        return [self.rx.value(), self.ry.value(), w, h]
+
+    def set_region(self, region: list[int]) -> None:
+        if len(region) != 4:
+            return
+        for sp, v in zip((self.rx, self.ry, self.rw, self.rh_spin), region):
+            sp.setValue(v)
+
+    def load(self, c: Condition) -> None:
+        if c.region and len(c.region) == 4:
+            self.set_region(c.region)
+        self.whitelist_edit.setText(c.ocr_whitelist)
+        idx = self.op_combo.findData(c.op)
+        if idx >= 0:
+            self.op_combo.setCurrentIndex(idx)
+        self.value_spin.setValue(c.value)
+
+    def to_condition(self) -> Condition:
+        region = self.get_region() or []
+        return Condition(
+            type="ocr_number",
+            region=region,
+            ocr_whitelist=self.whitelist_edit.text().strip(),
+            op=self.op_combo.currentData(),
+            value=self.value_spin.value(),
+        )
+
+
 # -------------------------------------------------------------- 編集ダイアログ
 class _WatcherDialog(QDialog):
     """ウォッチャー 1件の追加/編集ダイアログ。"""
@@ -254,10 +328,19 @@ class _WatcherDialog(QDialog):
         self.form_appear = _ImageConditionForm(show_consecutive=False)
         self.form_gone   = _ImageConditionForm(show_consecutive=True)
         self.form_digit  = _DigitConditionForm()
+        self.form_ocr    = _OcrConditionForm()
         self.stack.addWidget(self.form_appear)   # index 0
         self.stack.addWidget(self.form_gone)     # index 1
         self.stack.addWidget(self.form_digit)    # index 2
+        self.stack.addWidget(self.form_ocr)      # index 3
         cond_lay.addWidget(self.stack)
+
+        # OCR テストボタン（ocr_number 選択時のみ有効化）
+        self._btn_ocr_test = QPushButton("🔬 OCR テスト（範囲選択＆数値確認）")
+        self._btn_ocr_test.clicked.connect(self._open_ocr_test)
+        self._btn_ocr_test.setEnabled(False)
+        cond_lay.addWidget(self._btn_ocr_test)
+
         lay.addWidget(grp_cond)
 
         # ハンドラ
@@ -298,6 +381,30 @@ class _WatcherDialog(QDialog):
 
     def _on_cond_changed(self, idx: int) -> None:
         self.stack.setCurrentIndex(idx)
+        ctype = self.cond_combo.itemData(idx)
+        self._btn_ocr_test.setEnabled(ctype == "ocr_number")
+
+    def _open_ocr_test(self) -> None:
+        serial = getattr(self.parent(), "_mw", None)
+        serial = serial.current_serial if serial else None
+        # parent チェーン経由で MainWindow を探す
+        p = self.parent()
+        while p is not None:
+            if hasattr(p, "current_serial"):
+                serial = p.current_serial
+                break
+            p = p.parent() if hasattr(p, "parent") else None
+
+        existing = self.form_ocr.get_region()
+        dlg = OcrTestDialog(
+            serial=serial,
+            initial_region=existing if existing else None,
+            parent=self,
+        )
+        if dlg.exec() == OcrTestDialog.Accepted:
+            region = dlg.result_region()
+            if region:
+                self.form_ocr.set_region(region)
 
     def _browse_handler(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -322,6 +429,8 @@ class _WatcherDialog(QDialog):
             self.form_gone.load(w.condition)
         elif ctype == "digit_threshold":
             self.form_digit.load(w.condition)
+        elif ctype == "ocr_number":
+            self.form_ocr.load(w.condition)
 
         self.handler_edit.setText(w.handler)
         idx2 = self.after_combo.findData(w.after)
@@ -339,6 +448,8 @@ class _WatcherDialog(QDialog):
             cond = self.form_appear.to_condition("image_appear")
         elif ctype == "image_gone":
             cond = self.form_gone.to_condition("image_gone")
+        elif ctype == "ocr_number":
+            cond = self.form_ocr.to_condition()
         else:
             cond = self.form_digit.to_condition()
 

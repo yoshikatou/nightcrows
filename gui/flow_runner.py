@@ -11,6 +11,7 @@ Scene を順次実行する `replay_scene` の上に、以下を積む：
 - image_appear
 - image_gone （N回連続で不検出なら発火）
 - digit_threshold（0.png〜9.png でテンプレマッチして数値比較）
+- ocr_number（Tesseract OCR で数値を読んで閾値比較）
 
 未実装: interrupt="immediate"
 """
@@ -89,6 +90,8 @@ def _evaluate_condition(condition: Condition, img: np.ndarray) -> bool:
         return not _image_appear(condition, img)
     if condition.type == "digit_threshold":
         return _digit_threshold(condition, img)
+    if condition.type == "ocr_number":
+        return _ocr_number(condition, img)
     return False
 
 
@@ -176,6 +179,38 @@ def _read_digits(c: Condition, img: np.ndarray,
         return int(digits_str)
     except ValueError:
         return None
+
+
+def _ocr_number(c: Condition, img: np.ndarray) -> bool:
+    """Tesseract OCR で region 内の数値を読み、op/value と比較。"""
+    try:
+        import pytesseract
+    except ImportError:
+        return False
+    if not c.region or len(c.region) != 4:
+        return False
+    x, y, w, h = c.region
+    h_img, w_img = img.shape[:2]
+    x2 = min(x + w, w_img)
+    y2 = min(y + h, h_img)
+    crop = img[max(0, y):y2, max(0, x):x2]
+    if crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    config = "--psm 7 --oem 3"
+    wl = (c.ocr_whitelist or "").strip()
+    if wl:
+        config += f" -c tessedit_char_whitelist={wl}"
+    try:
+        text = pytesseract.image_to_string(gray, config=config).strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if not digits:
+            return False
+        return _compare(int(digits), c.op, c.value)
+    except Exception:
+        return False
 
 
 def _compare(a: int, op: str, b: int) -> bool:

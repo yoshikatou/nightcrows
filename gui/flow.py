@@ -26,7 +26,7 @@ class ScheduleEntry:
 # -------------------------------------------------------------- watcher types
 @dataclass
 class Condition:
-    type: str = "image_appear"       # "image_appear" | "image_gone" | "digit_threshold"
+    type: str = "image_appear"       # "image_appear" | "image_gone" | "digit_threshold" | "ocr_number"
     # 画像系
     template: str = ""               # image_appear / image_gone のテンプレ画像
     region: list[int] = field(default_factory=list)  # [x, y, w, h]
@@ -36,6 +36,8 @@ class Condition:
     digits_dir: str = ""             # 0.png〜9.png が入ったディレクトリ
     op: str = "<="                   # "<" "<=" ">" ">=" "=="
     value: int = 0
+    # OCR 系 (ocr_number) — Tesseract で数値を読む
+    ocr_whitelist: str = "0123456789"  # 読み取る文字種
 
 
 @dataclass
@@ -84,6 +86,12 @@ def _cond_to_dict(c: Condition) -> dict[str, Any]:
         d["digits_dir"] = c.digits_dir
         d["op"] = c.op
         d["value"] = c.value
+    elif c.type == "ocr_number":
+        if c.region:
+            d["region"] = list(c.region)
+        d["ocr_whitelist"] = c.ocr_whitelist
+        d["op"] = c.op
+        d["value"] = c.value
     return d
 
 
@@ -98,6 +106,7 @@ def _cond_from_dict(d: dict[str, Any]) -> Condition:
         digits_dir=d.get("digits_dir", ""),
         op=d.get("op", "<="),
         value=int(d.get("value", 0)),
+        ocr_whitelist=d.get("ocr_whitelist", "0123456789"),
     )
 
 
