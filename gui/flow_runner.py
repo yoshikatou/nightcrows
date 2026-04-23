@@ -29,6 +29,7 @@ import numpy as np
 
 from .adb import screencap
 from .flow import Condition, Flow, ScheduleEntry, Watcher
+from .maintenance import MaintenanceEntry, is_in_maintenance
 from .replay import replay_scene
 from .scene import load_scene
 
@@ -312,10 +313,30 @@ _PendingEvent = "_ScheduleEvent | _WatcherEvent"
 
 
 # ============================================================ main
+def _wait_maintenance(
+    entry: MaintenanceEntry, log: LogFn, should_stop: StopFn
+) -> None:
+    """メンテ終了時刻まで 30 秒ごとに待機する。"""
+    log(f"🔧 メンテナンス中: {entry.label}  {entry.start} 〜 {entry.end}")
+    while not should_stop():
+        now = datetime.now()
+        if is_in_maintenance([entry], now) is None:
+            log("🔧 メンテナンス終了 — 再開します")
+            return
+        remaining = datetime.strptime(entry.end, "%Y-%m-%d %H:%M") - now
+        mins = int(remaining.total_seconds() // 60)
+        log(f"🔧 メンテ待機中 … 残り約 {mins} 分")
+        for _ in range(30):
+            if should_stop():
+                return
+            time.sleep(1)
+
+
 def replay_flow(
     flow: Flow, serial: str,
     log: LogFn = print,
     should_stop: StopFn = lambda: False,
+    maintenance: list[MaintenanceEntry] | None = None,
 ) -> None:
     """フローを再生する。"""
     if not flow.main_sequence:
@@ -331,6 +352,8 @@ def replay_flow(
     def scene_interrupt() -> bool:
         """replay_scene に渡すストップ判定。schedule と watcher を評価。"""
         if should_stop():
+            return True
+        if maintenance and is_in_maintenance(maintenance, datetime.now()):
             return True
         fired = _check_schedule(flow, datetime.now(), last_fired_schedule)
         if fired is not None:
@@ -361,6 +384,13 @@ def replay_flow(
 
     try:
         while not should_stop():
+            # 0. メンテナンスチェック
+            if maintenance:
+                m = is_in_maintenance(maintenance, datetime.now())
+                if m is not None:
+                    _wait_maintenance(m, log, should_stop)
+                    continue
+
             # 1. pending イベント処理
             if pending:
                 event = pending.pop(0)

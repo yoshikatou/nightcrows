@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 import threading
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -12,10 +12,13 @@ from PySide6.QtWidgets import (
 )
 
 from .adb import adb_disconnect, discover_and_connect
+from .maintenance_dialog import MaintenanceDialog
 from .runner_widget import RunnerWidget
 from .scene_editor import SceneEditorWidget
 from .settings import AppSettings, load_settings, save_settings
 from .settings_dialog import DeviceSettingsDialog
+
+_WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +39,11 @@ class MainWindow(QMainWindow):
         self.connect_result_signal.connect(self._on_connect_result)
         self.scene_editor.scene_path_changed.connect(self._on_scene_path_changed)
 
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._tick_clock)
+        self._clock_timer.start(1000)
+        self._tick_clock()
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         central = QWidget()
@@ -54,11 +62,18 @@ class MainWindow(QMainWindow):
         self.btn_disconnect.setEnabled(False)
         self.btn_disconnect.clicked.connect(self._adb_disconnect)
         bar.addWidget(self.btn_disconnect)
+        btn_maintenance = QPushButton("🔧 メンテ")
+        btn_maintenance.clicked.connect(self._open_maintenance)
+        bar.addWidget(btn_maintenance)
         btn_settings = QPushButton("⚙")
         btn_settings.setFixedWidth(36)
         btn_settings.clicked.connect(self._open_settings)
         bar.addWidget(btn_settings)
         root.addLayout(bar)
+
+        self.clock_label = QLabel()
+        self.clock_label.setStyleSheet("padding-left: 4px; color: #333;")
+        root.addWidget(self.clock_label)
 
         self.status_label = QLabel("未接続")
         self.status_label.setStyleSheet("color: #000; padding-left: 4px;")
@@ -99,6 +114,17 @@ class MainWindow(QMainWindow):
             self.device_combo.setCurrentIndex(idx)
 
     # ---------------------------------------------------------------- title
+    def _tick_clock(self) -> None:
+        from datetime import datetime as _dt
+        now = _dt.now()
+        wd = _WEEKDAYS[now.weekday()]
+        self.clock_label.setText(
+            now.strftime(f"%Y-%m-%d（{wd}）%H:%M:%S")
+        )
+
+    def _open_maintenance(self) -> None:
+        MaintenanceDialog(parent=self).exec()
+
     def _update_title(self) -> None:
         name = self.scene_editor.scene.name or "(無題)"
         path = self.scene_editor.current_scene_path or "未保存"

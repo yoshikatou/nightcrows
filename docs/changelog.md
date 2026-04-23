@@ -11,6 +11,16 @@
 - Python 3.10 環境に `.venv/` を作成し、`requirements.txt` 依存をインストール
 - `numpy>=2.4` が Python 3.10 では存在しないため `numpy>=1.26` に緩和（numpy 2.2.6 が入る）
 
+### 日時・曜日表示 / メンテナンス日程登録
+
+- `main.py`: ヘッダーバーに日時・曜日をリアルタイム表示（`QTimer` 毎秒更新）
+  - 表示形式: `2026-04-23（水）14:35:22`
+- `main.py`: 「🔧 メンテ」ボタンからメンテナンス管理ダイアログを開く
+- `gui/maintenance.py`: `MaintenanceEntry(id, label, start, end)` データモデル + `maintenance.json` への保存
+- `gui/maintenance_dialog.py`: 一覧表示・追加・編集・削除ダイアログ。実施中エントリは赤字で表示
+- `flow_runner.py`: メインループ先頭と `scene_interrupt` でメンテ窓チェック。メンテ中は 30 秒ごとに残り時間をログ出力しながら待機、終了後自動再開
+- `runner_widget.py`: フロー開始時に `maintenance.json` を読み込んで `replay_flow` に渡す
+
 ### スケジュール：曜日指定対応
 
 - `ScheduleEntry` に `repeat: "weekly"` と `days: list[int]` を追加（0=月〜6=日）

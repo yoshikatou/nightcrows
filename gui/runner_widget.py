@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from .flow import load_flow
 from .flow_runner import replay_flow
+from .maintenance import load_maintenance
 
 FLOWS_DIR = "flows"
 
@@ -113,12 +114,17 @@ class RunnerWidget(QWidget):
         self._log(f"フロー開始: {flow.name}  main_sequence={len(flow.main_sequence)} 件, "
                   f"schedule={len(flow.schedule)} 件, watchers={len(flow.watchers)} 件")
 
+        maintenance = load_maintenance()
+        if maintenance:
+            self._log(f"メンテナンス登録: {len(maintenance)} 件")
+
         def run() -> None:
             try:
                 replay_flow(
                     flow, serial,
                     log=self._log,
                     should_stop=self.flow_stop.is_set,
+                    maintenance=maintenance,
                 )
             except Exception as e:
                 self._log(f"エラー: {e}")
