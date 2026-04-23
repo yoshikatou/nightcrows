@@ -121,7 +121,6 @@ class _ScheduleEntryDialog(QDialog):
         h, m = map(int, (exact_time or slot_time).split(":"))
         self.time_edit = QTimeEdit(QTime(h, m))
         self.time_edit.setDisplayFormat("HH:mm")
-        self.time_edit.setSingleStep(1)        # 1分単位
         self.time_edit.setWrapping(True)
         form.addRow("時刻:", self.time_edit)
         lay.addLayout(form)
