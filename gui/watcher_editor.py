@@ -312,7 +312,7 @@ class _WatcherDialog(QDialog):
 
         self.priority_spin = QSpinBox()
         self.priority_spin.setRange(0, 999)
-        form.addRow("優先度:", self.priority_spin)
+        form.addRow("優先度 (大きいほど優先):", self.priority_spin)
 
         lay.addLayout(form)
 
