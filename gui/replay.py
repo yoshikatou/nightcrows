@@ -45,7 +45,7 @@ def replay_scene(scene: Scene, serial: str,
             if not _wait_image(serial, step, log, should_stop):
                 log("wait_image タイムアウト - 中断")
                 return
-        elif step.type == "snapshot":
+        elif step.type in ("snapshot", "group_header"):
             pass
         elif step.type == "call_scene":
             _do_call_scene(step, serial, log, should_stop, _depth)

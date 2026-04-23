@@ -7,9 +7,10 @@ import threading
 from datetime import datetime
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMenu, QMessageBox,
+    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -137,13 +138,16 @@ class SceneEditorWidget(QWidget):
         right.addLayout(row4)
 
         row4b = QHBoxLayout()
-        btn_call = QPushButton("サブシーン追加")
-        btn_call.clicked.connect(self._add_call_scene)
+        btn_import = QPushButton("シーンを取り込む")
+        btn_import.clicked.connect(self._import_scene)
+        btn_group = QPushButton("グループ追加")
+        btn_group.clicked.connect(self._add_group_header)
         btn_up = QPushButton("↑ 上へ")
         btn_up.clicked.connect(self._move_step_up)
         btn_down = QPushButton("↓ 下へ")
         btn_down.clicked.connect(self._move_step_down)
-        row4b.addWidget(btn_call)
+        row4b.addWidget(btn_import)
+        row4b.addWidget(btn_group)
         row4b.addWidget(btn_up)
         row4b.addWidget(btn_down)
         right.addLayout(row4b)
@@ -347,17 +351,50 @@ class SceneEditorWidget(QWidget):
         self._refresh_step_list()
         self.step_list.setCurrentRow(row + 1)
 
-    def _add_call_scene(self) -> None:
+    def _import_scene(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "呼び出すシーンを選択", SCENES_DIR, "JSON (*.json)"
+            self, "取り込むシーンを選択", SCENES_DIR, "JSON (*.json)"
         )
         if not path:
             return
-        path = os.path.normpath(path).replace("\\", "/")
-        step = Step(type="call_scene", params={"scene": path})
-        self.scene.steps.append(step)
-        self._refresh_step_list(select_last=True)
-        self._log(f"call_scene 追加: {path}")
+        try:
+            sub = load_scene(path)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"読込失敗: {e}")
+            return
+
+        r = QMessageBox.question(
+            self, "グループヘッダー",
+            f"「{sub.name}」を取り込みます。\nグループヘッダーを追加しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+
+        steps_to_insert: list[Step] = []
+        if r == QMessageBox.Yes:
+            steps_to_insert.append(Step(type="group_header", params={"label": sub.name}))
+        steps_to_insert.extend(sub.steps)
+
+        # 選択行の次に挿入、未選択なら末尾
+        row = self.step_list.currentRow()
+        insert_at = (row + 1) if row >= 0 else len(self.scene.steps)
+        for j, step in enumerate(steps_to_insert):
+            self.scene.steps.insert(insert_at + j, step)
+
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(insert_at + len(steps_to_insert) - 1)
+        self._log(f"シーン取り込み: {sub.name}  {len(sub.steps)} ステップ")
+
+    def _add_group_header(self) -> None:
+        label, ok = QInputDialog.getText(self, "グループ名", "グループ名を入力:")
+        if not ok or not label.strip():
+            return
+        row = self.step_list.currentRow()
+        insert_at = (row + 1) if row >= 0 else len(self.scene.steps)
+        step = Step(type="group_header", params={"label": label.strip()})
+        self.scene.steps.insert(insert_at, step)
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(insert_at)
+        self._log(f"グループ追加: {label.strip()}")
 
     def _on_marker_moved(self, marker_idx: int, lx: int, ly: int) -> None:
         if marker_idx < 0 or marker_idx >= len(self._marker_step_indices):
@@ -375,21 +412,32 @@ class SceneEditorWidget(QWidget):
         self.step_list.blockSignals(True)
         self.step_list.clear()
         for i, s in enumerate(self.scene.steps):
+            if s.type == "group_header":
+                lbl = s.params.get("label", "")
+                item = QListWidgetItem(f"  ┄┄ {lbl} ┄┄")
+                f = QFont()
+                f.setBold(True)
+                item.setFont(f)
+                item.setForeground(QBrush(QColor("#1565C0")))
+                item.setBackground(QBrush(QColor("#E3F2FD")))
+                self.step_list.addItem(item)
+                continue
+
             if s.type == "tap":
-                label = f"{i + 1}. tap ({s.params.get('x')},{s.params.get('y')}) {s.params.get('duration_ms')}ms"
+                label = f"  {i + 1}. tap ({s.params.get('x')},{s.params.get('y')}) {s.params.get('duration_ms')}ms"
             elif s.type == "snapshot":
-                label = f"{i + 1}. 📷 snapshot  {os.path.basename(s.params.get('path', ''))}"
+                label = f"  {i + 1}. 📷 snapshot  {os.path.basename(s.params.get('path', ''))}"
             elif s.type == "wait_fixed":
-                label = f"{i + 1}. wait {s.params.get('seconds')}s"
+                label = f"  {i + 1}. wait {s.params.get('seconds')}s"
             elif s.type == "wait_image":
-                label = f"{i + 1}. wait_image  {os.path.basename(s.params.get('template', ''))}"
+                label = f"  {i + 1}. wait_image  {os.path.basename(s.params.get('template', ''))}"
             elif s.type == "swipe":
-                label = (f"{i + 1}. swipe ({s.params.get('x1')},{s.params.get('y1')})"
+                label = (f"  {i + 1}. swipe ({s.params.get('x1')},{s.params.get('y1')})"
                          f"->({s.params.get('x2')},{s.params.get('y2')}) "
                          f"{s.params.get('duration_ms')}ms")
             elif s.type == "scroll":
                 p = s.params
-                label = (f"{i + 1}. scroll "
+                label = (f"  {i + 1}. scroll "
                          f"({p.get('x1')}±{p.get('x1_jitter',0)},"
                          f"{p.get('y1')}±{p.get('y1_jitter',0)})"
                          f"→({p.get('x2')}±{p.get('x2_jitter',0)},"
@@ -398,9 +446,9 @@ class SceneEditorWidget(QWidget):
             elif s.type == "call_scene":
                 sub = s.params.get("scene", "")
                 name = os.path.splitext(os.path.basename(sub))[0] if sub else "(未設定)"
-                label = f"{i + 1}. → {name}  [{sub}]"
+                label = f"  {i + 1}. → {name}  [{sub}]"
             else:
-                label = f"{i + 1}. {s.type}  {s.params}"
+                label = f"  {i + 1}. {s.type}  {s.params}"
             self.step_list.addItem(label)
         if select_last and self.scene.steps:
             self.step_list.setCurrentRow(len(self.scene.steps) - 1)
