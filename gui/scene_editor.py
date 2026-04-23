@@ -411,10 +411,12 @@ class SceneEditorWidget(QWidget):
     def _refresh_step_list(self, select_last: bool = False) -> None:
         self.step_list.blockSignals(True)
         self.step_list.clear()
+        in_group = False
         for i, s in enumerate(self.scene.steps):
             if s.type == "group_header":
+                in_group = True
                 lbl = s.params.get("label", "")
-                item = QListWidgetItem(f"  ┄┄ {lbl} ┄┄")
+                item = QListWidgetItem(f"┄┄ {lbl} ┄┄")
                 f = QFont()
                 f.setBold(True)
                 item.setFont(f)
@@ -423,21 +425,23 @@ class SceneEditorWidget(QWidget):
                 self.step_list.addItem(item)
                 continue
 
+            pad = "    " if in_group else ""  # グループ内は4文字インデント
+
             if s.type == "tap":
-                label = f"  {i + 1}. tap ({s.params.get('x')},{s.params.get('y')}) {s.params.get('duration_ms')}ms"
+                label = f"{pad}{i + 1}. tap ({s.params.get('x')},{s.params.get('y')}) {s.params.get('duration_ms')}ms"
             elif s.type == "snapshot":
-                label = f"  {i + 1}. 📷 snapshot  {os.path.basename(s.params.get('path', ''))}"
+                label = f"{pad}{i + 1}. 📷 snapshot  {os.path.basename(s.params.get('path', ''))}"
             elif s.type == "wait_fixed":
-                label = f"  {i + 1}. wait {s.params.get('seconds')}s"
+                label = f"{pad}{i + 1}. wait {s.params.get('seconds')}s"
             elif s.type == "wait_image":
-                label = f"  {i + 1}. wait_image  {os.path.basename(s.params.get('template', ''))}"
+                label = f"{pad}{i + 1}. wait_image  {os.path.basename(s.params.get('template', ''))}"
             elif s.type == "swipe":
-                label = (f"  {i + 1}. swipe ({s.params.get('x1')},{s.params.get('y1')})"
+                label = (f"{pad}{i + 1}. swipe ({s.params.get('x1')},{s.params.get('y1')})"
                          f"->({s.params.get('x2')},{s.params.get('y2')}) "
                          f"{s.params.get('duration_ms')}ms")
             elif s.type == "scroll":
                 p = s.params
-                label = (f"  {i + 1}. scroll "
+                label = (f"{pad}{i + 1}. scroll "
                          f"({p.get('x1')}±{p.get('x1_jitter',0)},"
                          f"{p.get('y1')}±{p.get('y1_jitter',0)})"
                          f"→({p.get('x2')}±{p.get('x2_jitter',0)},"
@@ -446,9 +450,9 @@ class SceneEditorWidget(QWidget):
             elif s.type == "call_scene":
                 sub = s.params.get("scene", "")
                 name = os.path.splitext(os.path.basename(sub))[0] if sub else "(未設定)"
-                label = f"  {i + 1}. → {name}  [{sub}]"
+                label = f"{pad}{i + 1}. → {name}  [{sub}]"
             else:
-                label = f"  {i + 1}. {s.type}  {s.params}"
+                label = f"{pad}{i + 1}. {s.type}  {s.params}"
             self.step_list.addItem(label)
         if select_last and self.scene.steps:
             self.step_list.setCurrentRow(len(self.scene.steps) - 1)
