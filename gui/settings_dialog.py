@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
+from .adb import adb_devices, is_usb_serial
 from .mdns_dialog import MdnsDialog
 from .settings import AppSettings, Device
 
@@ -18,7 +19,7 @@ class DeviceSettingsDialog(QDialog):
         self.resize(560, 440)
 
         self._table = QTableWidget(0, 2)
-        self._table.setHorizontalHeaderLabels(["ラベル", "IP"])
+        self._table.setHorizontalHeaderLabels(["ラベル", "IP / USB シリアル"])
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -34,9 +35,12 @@ class DeviceSettingsDialog(QDialog):
         btn_del.clicked.connect(self._remove_selected)
         btn_mdns = QPushButton("🔍 mDNS 検出")
         btn_mdns.clicked.connect(self._discover_mdns)
+        btn_usb = QPushButton("🔌 USB 検出")
+        btn_usb.clicked.connect(self._discover_usb)
         row.addWidget(btn_add)
         row.addWidget(btn_del)
         row.addWidget(btn_mdns)
+        row.addWidget(btn_usb)
         row.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -98,6 +102,44 @@ class DeviceSettingsDialog(QDialog):
             self._table.setItem(r, 1, QTableWidgetItem(ip))
         else:
             self._append_row(ip, ip)
+
+    def _discover_usb(self) -> None:
+        import subprocess
+        from .adb import ADB
+
+        def get_model(serial: str) -> str:
+            try:
+                r = subprocess.run(
+                    [ADB, "-s", serial, "shell", "getprop", "ro.product.model"],
+                    capture_output=True, text=True, timeout=4,
+                )
+                return r.stdout.strip() or serial
+            except Exception:
+                return serial
+
+        devices = [(s, st) for s, st in adb_devices() if is_usb_serial(s)]
+        if not devices:
+            QMessageBox.information(self, "USB 検出",
+                "USB 接続中のデバイスが見つかりませんでした。\n"
+                "ケーブルを接続し、スマホで「USBデバッグを許可」を選んでください。")
+            return
+
+        if len(devices) == 1:
+            serial, status = devices[0]
+            model = get_model(serial)
+            self._append_row(model, serial)
+            QMessageBox.information(self, "USB 検出",
+                f"デバイスを追加しました:\n{model}  /  {serial}  ({status})")
+        else:
+            from PySide6.QtWidgets import QInputDialog
+            info = [(s, st, get_model(s)) for s, st in devices]
+            items = [f"{model}  /  {s}  ({st})" for s, st, model in info]
+            item, ok = QInputDialog.getItem(self, "USB デバイス選択",
+                                            "追加するデバイスを選択:", items, 0, False)
+            if ok and item:
+                idx = items.index(item)
+                serial, _, model = info[idx]
+                self._append_row(model, serial)
 
     def _browse_tesseract(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

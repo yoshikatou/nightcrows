@@ -177,7 +177,7 @@ templates/
 | メインが最後まで行ったら | 最後のシーンを繰り返し続ける（`after_main: "stay"`） |
 | 日付跨ぎ | 特別扱いしない。0:00 リセットしたければ schedule に入れる |
 | 曜日スケジュール | `repeat: "weekly"` + `days: [0〜6]` で指定。0=月スタート（Python `weekday()` に準拠） |
-| 分岐 (if/else) | 入れない。watcher の平板リストで表現 |
+| 分岐 (if/else) | シーンステップ内で `if_image` を使う。watcher の平板リストで表現することも可 |
 | 同時発火 | priority 高 → 配列先 の順で1つだけ実行 |
 | ハンドラ終了後 | デフォ `restart_scene`（個別に `next_scene` も可） |
 | 割り込みタイミング | デフォ `step_end`（スワイプ途中切りを避ける。個別に `immediate` も可） |
@@ -186,6 +186,41 @@ templates/
 | ハンドラ中の他 watcher | 停止 |
 | 画像消失の発火判定 | N 回連続（デフォ 3）で誤検知防止 |
 | ウォッチャーの polling 間隔 | デフォ 1.0 秒（`settings.polling_interval_s` で変更） |
+| ウォッチャー管理 | `watchers/` ディレクトリに個別 JSON で保存（旧: `watchers.json` 1ファイル） |
+| restart_scene のフォールバック | まだシーンが動いていない場合は `_last_due_scenes()` で直近スケジュールを推定して実行 |
+
+## ScheduleEntry の `sequence` フィールド
+
+複数シーンをまとめてスケジュール発火させたい場合に使う。
+
+```json
+{
+  "time": "15:00",
+  "sequence": ["scenes/hunt_a.json", "scenes/hunt_b.json"],
+  "repeat": "daily"
+}
+```
+
+`sequence` がある場合は `target` を無視する。`sequence` が空または省略の場合は `target` を1件のリストとして扱う。
+
+## `restart_scene` のフォールバック動作
+
+フローを途中時間から開始すると、過去のスケジュールが全スキップされて `last_running_scene = None` になる。
+この状態でウォッチャーが `after=restart_scene` で発火すると「行き先なし」になっていた。
+
+**`_last_due_scenes(flow, now)` で解決（`flow_runner.py`）:**
+
+1. `flow.schedule` を走査し、`now` より前で今日発火すべきだったエントリを抽出
+2. 最も時刻が遅いエントリのシーンリストを返す
+3. ウォッチャーハンドラ完了後、`last_running_scene is None` の場合にこれを使ってシーンを実行
+
+```
+例: 17:00 起動、スケジュール = 9:00 / 12:00 / 15:00
+→ 全スキップ、last_running_scene = None
+→ 18:21 にウォッチャー発火、after=restart_scene
+→ _last_due_scenes が 15:00 エントリを返す
+→ 15:00 のシーン（激戦地2 80LV.json）を実行
+```
 
 ## 実装状況
 
@@ -198,10 +233,12 @@ templates/
 - [x] ウォッチャー — `image_gone`（N回連続外れ判定）
 - [x] ウォッチャー — `digit_threshold`（0.png〜9.png でテンプレマッチして数値比較）
 - [x] ウォッチャー — `ocr_number`（Tesseract OCR で数値読み取り・閾値比較）
-- [x] ウォッチャー編集タブ（スクショベースのウィザード、`watchers.json` で独立管理）
+- [x] ウォッチャー編集タブ（スクショベースの1画面ウィザード、`watchers/` ディレクトリで独立管理）
 - [x] OCR テストダイアログ（スクショ → ドラッグ範囲選択 → 数値読み取り確認）
-- [x] ランナータブ（最小：フロー選択、開始/停止、ログ）
-- [x] フロー編集タブ（TV番組表スタイルグリッド、1分単位時刻指定対応）
+- [x] ランナータブ（フロー選択・開始/停止・ログ・即時シーン実行）
+- [x] フロー編集タブ（TV番組表スタイルグリッド・1分単位時刻・右クリック即時実行・現在時刻赤線・自動追従）
+- [x] `pick_scene` ステップ（ランダム / 順番ローテーション）
+- [x] `restart_scene` フォールバック（直近スケジュールへの自動推定）
+- [x] ウォッチャータグバー（フロー編集画面下部、クリックで有効/無効切替）
 - [ ] 割り込みモード `interrupt: "immediate"`（現状は `step_end` のみ）
 - [ ] ランナータブ拡張（現在シーン表示、watcher ステータス、手動トリガ）
-- [ ] ランナー分離ウィンドウ化

@@ -1,0 +1,37 @@
+{
+  "name": "基本",
+  "version": 1,
+  "device_ip": "",
+  "main_sequence": [],
+  "after_main": "stay",
+  "schedule": [
+    {
+      "time": "12:55",
+      "target": "BR.json",
+      "repeat": "weekly",
+      "days": [
+        4
+      ]
+    },
+    {
+      "time": "13:08",
+      "target": "近隣の街でポーション補給.json",
+      "repeat": "weekly",
+      "days": [
+        4
+      ]
+    },
+    {
+      "time": "15:00",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
+        4
+      ]
+    }
+  ],
+  "watchers": [],
+  "settings": {
+    "polling_interval_s": 1.0
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "name": "近隣の街でポーション補給",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 1,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_164123_336307.png"
+    },
+    {
+      "type": "tap",
+      "x": 941,
+      "y": 1131,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 30.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_130501_236604.png"
+    },
+    {
+      "type": "tap",
+      "x": 286,
+      "y": 146,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 15.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_130537_990066.png"
+    },
+    {
+      "type": "tap",
+      "x": 700,
+      "y": 1146,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_130611_391068.png"
+    },
+    {
+      "type": "tap",
+      "x": 1492,
+      "y": 1080,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 3.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_130631_916044.png"
+    },
+    {
+      "type": "tap",
+      "x": 452,
+      "y": 529,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_130645_644261.png"
+    },
+    {
+      "type": "tap",
+      "x": 1569,
+      "y": 642,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "tap",
+      "x": 1558,
+      "y": 1054,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260424_130708_536535.png"
+    },
+    {
+      "type": "tap",
+      "x": 2565,
+      "y": 54,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 3.5
+    }
+  ]
+}

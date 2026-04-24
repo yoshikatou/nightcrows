@@ -13,15 +13,52 @@ SCRCPY = r"C:\scrcpy\scrcpy.exe"
 DEFAULT_SERIAL = os.environ.get("ADB_SERIAL", "192.168.255.57:34497")
 
 
-def screencap(serial: str, timeout: float = 10.0) -> bytes:
-    """現在の画面の PNG バイト列を返す。"""
+def screencap(serial: str, timeout: float = 15.0) -> bytes:
+    """現在の画面の PNG バイト列を返す。
+
+    Windows の adb.exe は exec-out のバイナリ出力で \\r\\n 変換を行うことがある。
+    PNG シグネチャ検出で破損を判定し、pull 方式にフォールバックする。
+    """
+    import tempfile, os as _os
+
     r = subprocess.run(
         [ADB, "-s", serial, "exec-out", "screencap", "-p"],
         capture_output=True, timeout=timeout,
     )
     if r.returncode != 0:
-        raise RuntimeError(f"screencap failed: {r.stderr.decode(errors='replace')}")
-    return r.stdout
+        raise RuntimeError(f"screencap failed (exec-out): {r.stderr.decode(errors='replace')}")
+
+    data = r.stdout
+    # PNG 正規シグネチャは 89 50 4E 47 0D 0A 1A 0A （\r\n を含む）
+    # → 先頭8バイトが一致すれば汚染なし、そのまま返す
+    _PNG_SIG = b"\x89PNG\r\n\x1a\n"
+    if data[:8] == _PNG_SIG:
+        return data
+
+    # シグネチャが崩れている場合のみ CRLF 修復を試みる
+    # Windows adb.exe が \n → \r\n 変換した場合: 0D 0D 0A → 0D 0A に戻す
+    if data[:4] == b"\x89PNG":
+        fixed = data.replace(b"\r\n", b"\n")
+        if fixed[:8] == _PNG_SIG:
+            return fixed
+
+    # フォールバック: デバイス上に保存して pull
+    remote = "/sdcard/__nightcrows_sc__.png"
+    subprocess.run([ADB, "-s", serial, "shell", "screencap", "-p", remote],
+                   capture_output=True, timeout=timeout)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        local = f.name
+    try:
+        r2 = subprocess.run([ADB, "-s", serial, "pull", remote, local],
+                            capture_output=True, timeout=timeout)
+        if r2.returncode != 0:
+            raise RuntimeError(f"pull failed: {r2.stderr.decode(errors='replace')}")
+        with open(local, "rb") as f:
+            return f.read()
+    finally:
+        subprocess.run([ADB, "-s", serial, "shell", "rm", remote],
+                       capture_output=True, timeout=5)
+        _os.unlink(local)
 
 
 def input_swipe(serial: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int) -> None:
@@ -30,6 +67,14 @@ def input_swipe(serial: str, x1: int, y1: int, x2: int, y2: int, duration_ms: in
         [ADB, "-s", serial, "shell", "input", "swipe",
          str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(duration_ms)],
         capture_output=True, timeout=duration_ms // 1000 + 5,
+    )
+
+
+def input_keyevent(serial: str, keycode: str) -> None:
+    """Android キーイベントを送信する。keycode は文字列 ('KEYCODE_BACK' or '4' など)。"""
+    subprocess.run(
+        [ADB, "-s", serial, "shell", "input", "keyevent", keycode],
+        capture_output=True, timeout=5,
     )
 
 
@@ -182,6 +227,25 @@ def adb_disconnect(serial: str, timeout: float = 5.0) -> tuple[bool, str]:
         return False, f"timeout after {timeout}s"
     out = ((r.stdout or "") + (r.stderr or "")).strip()
     return r.returncode == 0, out or "(disconnected)"
+
+
+def is_usb_serial(value: str) -> bool:
+    """ドットを含まない = USB シリアル番号と判定する。"""
+    return "." not in value
+
+
+def connect_usb(serial: str, log_fn: Callable[[str], None] = print) -> tuple[bool, str, str]:
+    """USB 接続済みデバイスの疎通確認。adb connect は不要なので ping のみ。"""
+    log_fn(f"USB デバイス確認: {serial}")
+    for s, status in adb_devices():
+        if s == serial:
+            if status != "device":
+                return False, "", f"デバイス状態が '{status}' です（認証を許可してください）"
+            if adb_ping(serial, timeout=3):
+                log_fn(f"  USB 接続確認: {serial}")
+                return True, serial, f"USB: {serial}"
+            return False, "", f"デバイスは見えているが応答なし: {serial}"
+    return False, "", f"adb devices に見つかりません: {serial}（ケーブルを確認してください）"
 
 
 def discover_and_connect(ip: str, log_fn: Callable[[str], None] = print,

@@ -333,10 +333,39 @@ class WatcherState:
             time.sleep(self._poll_s)
 
 
+# ============================================================ ヘルパー
+def _last_due_scenes(flow: Flow, now: datetime) -> list[str]:
+    """現在時刻より前で直近のスケジュールエントリのシーンリストを返す。
+
+    フロー開始時にスケジュールを全スキップした場合など、まだシーンが実行されて
+    いないときの restart_scene フォールバックに使う。
+    """
+    today_str = now.date().isoformat()
+    current_hm = now.strftime("%H:%M")
+    today_wd = now.weekday()
+
+    candidates: list[tuple[str, list[str]]] = []
+    for entry in flow.schedule:
+        if entry.time >= current_hm:
+            continue
+        if entry.repeat == "once" and entry.date != today_str:
+            continue
+        if entry.repeat == "weekly" and entry.days and today_wd not in entry.days:
+            continue
+        scenes = entry.sequence or ([entry.target] if entry.target else [])
+        if scenes:
+            candidates.append((entry.time, list(scenes)))
+
+    if not candidates:
+        return []
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
 # ============================================================ events
 @dataclass
 class _ScheduleEvent:
-    target: str
+    scenes: list[str]  # 実行するシーンの順序リスト
 
 
 @dataclass
@@ -372,14 +401,35 @@ def replay_flow(
     log: LogFn = print,
     should_stop: StopFn = lambda: False,
     maintenance: list[MaintenanceEntry] | None = None,
+    notify_fn: "Callable[[str, str], None] | None" = None,
 ) -> None:
     """フローを再生する。"""
-    if not flow.main_sequence:
-        log("main_sequence が空 — 何もしない")
-        return
+    schedule_only = not flow.main_sequence
+    if schedule_only:
+        log("main_sequence なし — スケジュール＋ウォッチャー監視モードで起動")
 
     last_fired_schedule: dict[int, date] = {}
     pending: list[object] = []
+
+    # 起動時点で時刻が過ぎているエントリは本日分を発火済みとしてスキップ
+    _now_start = datetime.now()
+    _today_start = _now_start.date()
+    _hm_start = _now_start.strftime("%H:%M")
+    _wd_start = _now_start.weekday()
+    for _idx, _entry in enumerate(flow.schedule):
+        if _entry.time >= _hm_start:
+            continue
+        if _entry.repeat == "daily":
+            last_fired_schedule[_idx] = _today_start
+        elif _entry.repeat == "weekly":
+            if not _entry.days or _wd_start in _entry.days:
+                last_fired_schedule[_idx] = _today_start
+        elif _entry.repeat == "once":
+            if _entry.date == _today_start.isoformat():
+                last_fired_schedule[_idx] = _today_start
+    skipped = sum(1 for v in last_fired_schedule.values() if v == _today_start)
+    if skipped:
+        log(f"⏭ 起動時刻 {_hm_start} より前のスケジュール {skipped} 件をスキップ")
 
     watcher_state = WatcherState(flow, serial, log)
     watcher_state.start()
@@ -394,16 +444,22 @@ def replay_flow(
         if fired is not None:
             idx, entry = fired
             last_fired_schedule[idx] = datetime.now().date()
-            pending.append(_ScheduleEvent(target=entry.target))
+            scenes = entry.sequence or ([entry.target] if entry.target else [])
+            pending.append(_ScheduleEvent(scenes=scenes))
             log(f"📅 スケジュール発火 (step_end 割り込み): "
-                f"{entry.time} → {entry.target}")
+                f"{entry.time} → {scenes}")
             return True
         w = watcher_state.pop_fired()
         if w is not None:
             pending.append(_WatcherEvent(watcher=w))
             log(f"👁 watcher 発火 (step_end 割り込み): {w.id} → {w.handler}")
+            if w.alert_desktop and notify_fn:
+                notify_fn(f"ウォッチャー発火: {w.title}", w.handler or "")
             return True
         return False
+
+    # pick_scene の順番モード用カウンタ（フロー実行中は持続）
+    seq_state: dict[str, int] = {}
 
     def run_scene(path: str, label: str) -> None:
         log(f"▶ {label}: {path}")
@@ -412,10 +468,12 @@ def replay_flow(
         except Exception as e:
             log(f"  シーン読込失敗: {path}: {e}")
             return
-        replay_scene(scene, serial, log=log, should_stop=scene_interrupt)
+        replay_scene(scene, serial, log=log, should_stop=scene_interrupt,
+                     _seq_state=seq_state)
 
     current_idx = 0
     main_seq = flow.main_sequence
+    last_running_scene: str | None = None   # restart_scene 用：直前に実行したシーンパス
 
     try:
         while not should_stop():
@@ -430,9 +488,11 @@ def replay_flow(
             if pending:
                 event = pending.pop(0)
                 if isinstance(event, _ScheduleEvent):
-                    run_scene(event.target, "スケジュール")
-                    if event.target in main_seq:
-                        current_idx = main_seq.index(event.target) + 1
+                    for i, path in enumerate(event.scenes):
+                        if should_stop():
+                            break
+                        last_running_scene = path
+                        run_scene(path, f"スケジュール [{i + 1}/{len(event.scenes)}]")
                 elif isinstance(event, _WatcherEvent):
                     w = event.watcher
                     watcher_state.pause()
@@ -445,9 +505,26 @@ def replay_flow(
                     if w.after == "stop":
                         log(f"watcher {w.id} after=stop のため終了")
                         return
-                    if w.after == "next_scene":
+                    if w.after == "restart_scene" and schedule_only:
+                        if last_running_scene:
+                            log(f"  → restart_scene: [{last_running_scene}] を最初からやり直し")
+                            run_scene(last_running_scene, "restart_scene")
+                        else:
+                            # まだシーンが実行されていない — 直近スケジュールに戻る
+                            fallback = _last_due_scenes(flow, datetime.now())
+                            if fallback:
+                                names = ", ".join(fallback)
+                                log(f"  → restart_scene: 未実行のため直近スケジュール [{names}] を実行")
+                                for fi, fpath in enumerate(fallback):
+                                    if should_stop():
+                                        break
+                                    last_running_scene = fpath
+                                    run_scene(fpath, f"restart_scene 直近スケジュール [{fi + 1}/{len(fallback)}]")
+                            else:
+                                log("  → restart_scene: 直前のシーンが不明のためスキップ")
+                    elif w.after == "next_scene":
                         current_idx += 1
-                    # restart_scene: current_idx そのまま
+                    # main_sequence の restart_scene: current_idx そのまま
                 continue
 
             # 2. スケジュール直接評価（シーン開始前）
@@ -455,34 +532,47 @@ def replay_flow(
             if fired is not None:
                 idx, entry = fired
                 last_fired_schedule[idx] = datetime.now().date()
-                log(f"📅 スケジュール発火: {entry.time} → {entry.target}")
-                pending.append(_ScheduleEvent(target=entry.target))
+                scenes = entry.sequence or ([entry.target] if entry.target else [])
+                log(f"📅 スケジュール発火: {entry.time} → {scenes}")
+                pending.append(_ScheduleEvent(scenes=scenes))
                 continue
 
             # 3. ウォッチャー直接評価（シーン開始前）
             w = watcher_state.pop_fired()
             if w is not None:
                 log(f"👁 watcher 発火: {w.id} → {w.handler}")
+                if w.alert_desktop and notify_fn:
+                    notify_fn(f"ウォッチャー発火: {w.title}", w.handler or "")
                 pending.append(_WatcherEvent(watcher=w))
                 continue
 
-            # 4. 通常メインシーケンス
-            if current_idx < len(main_seq):
-                path = main_seq[current_idx]
-                pending_before = len(pending)
-                run_scene(path, f"メイン [{current_idx + 1}/{len(main_seq)}]")
-                interrupted = len(pending) > pending_before
-                if not interrupted:
-                    current_idx += 1
+            # 4. 通常メインシーケンス（main_sequence がある場合のみ）
+            if not schedule_only:
+                if current_idx < len(main_seq):
+                    path = main_seq[current_idx]
+                    last_running_scene = path
+                    pending_before = len(pending)
+                    run_scene(path, f"メイン [{current_idx + 1}/{len(main_seq)}]")
+                    interrupted = len(pending) > pending_before
+                    if not interrupted:
+                        current_idx += 1
+                    continue
+
+                # 5. after_main
+                if flow.after_main == "stop":
+                    log("after_main=stop のため終了")
+                    return
+                # stay: 最後のシーンを繰り返す
+                last_path = main_seq[-1]
+                run_scene(last_path, "stay（最後のシーンを繰り返し）")
                 continue
 
-            # 5. after_main
-            if flow.after_main == "stop":
-                log("after_main=stop のため終了")
-                return
-            # stay: 最後のシーンを繰り返す
-            last_path = main_seq[-1]
-            run_scene(last_path, "stay（最後のシーンを繰り返し）")
+            # スケジュールのみモード: ポーリング待機
+            poll = flow.settings.polling_interval_s if flow.settings else 1.0
+            for _ in range(max(1, int(poll * 10))):
+                if should_stop():
+                    break
+                time.sleep(0.1)
     finally:
         watcher_state.stop()
         log("停止")

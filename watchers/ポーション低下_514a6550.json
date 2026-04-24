@@ -1,0 +1,23 @@
+{
+  "id": "514a6550",
+  "title": "ポーション低下",
+  "enabled": true,
+  "priority": 900,
+  "condition": {
+    "type": "ocr_number",
+    "region": [
+      804,
+      1141,
+      70,
+      29
+    ],
+    "ocr_whitelist": "0123456789",
+    "op": "<=",
+    "value": 454
+  },
+  "handler": "近隣の街でポーション補給.json",
+  "after": "restart_scene",
+  "cooldown_s": 30.0,
+  "interrupt": "step_end",
+  "alert_desktop": true
+}

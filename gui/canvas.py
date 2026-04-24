@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRect, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel
 
@@ -43,6 +43,20 @@ class SnapshotCanvas(QLabel):
         self._dragging_marker_idx: int | None = None
         self._drag_marker_widget_pos: QPoint | None = None
 
+        # ドラッグステップ用の始点・終点ピン (logical coords)
+        self._drag_pin_start: tuple[int, int] | None = None
+        self._drag_pin_end: tuple[int, int] | None = None
+
+        # wait_image マッチテスト用オーバーレイ
+        self._match_region: list[int] | None = None    # 検索範囲 [x, y, w, h]
+        self._match_rect: list[int] | None = None      # マッチ位置 [x, y, w, h]
+        self._match_score: float | None = None
+        self._match_threshold: float = 0.85
+
+        # if_image ブランチタップマーカー
+        self._branch_then_markers: list[tuple[int, int]] = []  # (lx, ly)
+        self._branch_else_markers: list[tuple[int, int]] = []  # (lx, ly)
+
     def set_snapshot(self, pixmap: QPixmap | None) -> None:
         self._orig_pixmap = pixmap
         if pixmap:
@@ -61,6 +75,37 @@ class SnapshotCanvas(QLabel):
 
     def set_markers(self, markers: list[Marker]) -> None:
         self._markers = markers
+        self.update()
+
+    def set_drag_pins(self, start: tuple[int, int] | None, end: tuple[int, int] | None = None) -> None:
+        self._drag_pin_start = start
+        self._drag_pin_end = end
+        self.update()
+
+    def set_match_overlay(self, region: list[int] | None, match_rect: list[int] | None,
+                          score: float | None, threshold: float = 0.85) -> None:
+        self._match_region = region
+        self._match_rect = match_rect
+        self._match_score = score
+        self._match_threshold = threshold
+        self.update()
+
+    def clear_match_overlay(self) -> None:
+        self._match_region = None
+        self._match_rect = None
+        self._match_score = None
+        self.update()
+
+    def set_branch_markers(self,
+                           then_taps: list[tuple[int, int]],
+                           else_taps: list[tuple[int, int]]) -> None:
+        self._branch_then_markers = list(then_taps)
+        self._branch_else_markers = list(else_taps)
+        self.update()
+
+    def clear_branch_markers(self) -> None:
+        self._branch_then_markers = []
+        self._branch_else_markers = []
         self.update()
 
     # ---------------------------------------------------------------- paint
@@ -131,17 +176,96 @@ class SnapshotCanvas(QLabel):
                          int(radius * 2), int(radius * 2))
             p.drawText(rect, Qt.AlignCenter, str(num))
 
+        # if_image ブランチタップマーカー
+        for branch_markers, fill, label_prefix in [
+            (self._branch_then_markers, QColor("#1B5E20"), "✓"),
+            (self._branch_else_markers, QColor("#B71C1C"), "✗"),
+        ]:
+            for idx, (lx, ly) in enumerate(branch_markers):
+                wx = self._display_rect.left() + lx * self._scale
+                wy = self._display_rect.top() + ly * self._scale
+                r = 18
+                p.setBrush(fill)
+                p.setPen(QPen(QColor("white"), 2))
+                p.drawEllipse(QPointF(wx, wy), r, r)
+                font_b = QFont(); font_b.setBold(True); font_b.setPointSize(9)
+                p.setFont(font_b)
+                p.setPen(QColor("white"))
+                p.drawText(
+                    QRect(int(wx - r), int(wy - r), r * 2, r * 2),
+                    Qt.AlignCenter, f"{label_prefix}{idx + 1}"
+                )
+
         if self._drag_start and self._drag_end:
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(Qt.red, 2, Qt.SolidLine))
             p.drawRect(QRect(self._drag_start, self._drag_end).normalized())
 
+        # ドラッグステップ始点ピン（青）・終点ピン（緑）
+        for pin_coord, color, label in [
+            (self._drag_pin_start, QColor("#1565C0"), "S"),
+            (self._drag_pin_end,   QColor("#2E7D32"), "E"),
+        ]:
+            if pin_coord is None:
+                continue
+            plx, ply = pin_coord
+            pwx = self._display_rect.left() + plx * self._scale
+            pwy = self._display_rect.top()  + ply * self._scale
+            r = 16
+            p.setBrush(color)
+            p.setPen(QPen(QColor("white"), 2))
+            p.drawEllipse(QPointF(pwx, pwy), r, r)
+            font2 = QFont()
+            font2.setBold(True)
+            font2.setPointSize(9)
+            p.setFont(font2)
+            p.setPen(QColor("white"))
+            p.drawText(QRect(int(pwx - r), int(pwy - r), r * 2, r * 2), Qt.AlignCenter, label)
+        # 始点と終点が両方あれば矢印線を描画
+        if self._drag_pin_start and self._drag_pin_end:
+            sx = self._display_rect.left() + self._drag_pin_start[0] * self._scale
+            sy = self._display_rect.top()  + self._drag_pin_start[1] * self._scale
+            ex = self._display_rect.left() + self._drag_pin_end[0]   * self._scale
+            ey = self._display_rect.top()  + self._drag_pin_end[1]   * self._scale
+            p.setPen(QPen(QColor("#FFA000"), 2, Qt.DashLine))
+            p.drawLine(QPointF(sx, sy), QPointF(ex, ey))
+
+        # wait_image マッチテストオーバーレイ
+        def _lrect(lx, ly, lw, lh) -> QRectF:
+            return QRectF(
+                self._display_rect.left() + lx * self._scale,
+                self._display_rect.top()  + ly * self._scale,
+                lw * self._scale, lh * self._scale,
+            )
+        if self._match_region:
+            rx, ry, rw, rh = self._match_region
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor("#1565C0"), 2, Qt.DashLine))
+            p.drawRect(_lrect(rx, ry, rw, rh))
+        if self._match_rect is not None and self._match_score is not None:
+            mx, my, mw, mh = self._match_rect
+            ok = self._match_score >= self._match_threshold
+            hit_color = QColor("#2E7D32") if ok else QColor("#C62828")
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(hit_color, 3))
+            r = _lrect(mx, my, mw, mh)
+            p.drawRect(r)
+            lbl = f"{'✓' if ok else '✗'} {self._match_score:.3f}"
+            score_font = QFont(); score_font.setBold(True); score_font.setPointSize(11)
+            p.setFont(score_font)
+            p.setPen(QPen(QColor("black"), 1))
+            p.drawText(QPointF(r.x() + 2, r.y() - 6), lbl)
+            p.setPen(hit_color)
+            p.drawText(QPointF(r.x() + 1, r.y() - 7), lbl)
+
     # ----------------------------------------------------------------- mouse
     def _widget_to_logical(self, pt: QPoint) -> tuple[int, int] | None:
-        if not self._display_rect.contains(pt) or self._scale <= 0:
+        if self._scale <= 0 or self._display_rect.isEmpty():
             return None
         lx = int((pt.x() - self._display_rect.left()) / self._scale)
         ly = int((pt.y() - self._display_rect.top()) / self._scale)
+        lx = max(0, min(lx, self._img_w - 1))
+        ly = max(0, min(ly, self._img_h - 1))
         return lx, ly
 
     def _find_marker_at(self, pt: QPoint) -> int | None:

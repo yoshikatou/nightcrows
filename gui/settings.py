@@ -18,6 +18,8 @@ class Device:
 class AppSettings:
     devices: list[Device] = field(default_factory=list)
     tesseract_cmd: str = ""   # 空 = PATH から自動検出
+    last_device: str = ""     # 最後に接続成功したデバイスの IP / USB シリアル
+    last_flow: str = ""       # 最後に開いたフローのパス
 
 
 def _default_settings() -> AppSettings:
@@ -63,6 +65,8 @@ def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
     return AppSettings(
         devices=devices,
         tesseract_cmd=data.get("tesseract_cmd", ""),
+        last_device=data.get("last_device", ""),
+        last_flow=data.get("last_flow", ""),
     )
 
 
@@ -70,6 +74,8 @@ def save_settings(s: AppSettings, path: str = SETTINGS_PATH) -> None:
     data = {
         "devices": [{"label": d.label, "ip": d.ip} for d in s.devices],
         "tesseract_cmd": s.tesseract_cmd,
+        "last_device": s.last_device,
+        "last_flow": s.last_flow,
     }
     out_dir = os.path.dirname(path)
     if out_dir:
