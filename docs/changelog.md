@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-04-24（夜間セッション）
+
+### OCR 誤検知対策：連続N回検知オプション
+
+**背景:** OCR 数値判定（`ocr_number`）は1回の読み取り結果だけで発火していたため、画面遷移中の一瞬の表示乱れや OCR の読み誤りで誤発火することがあった。
+
+**解決策:** `image_gone` が持つ `consecutive`（連続N回判定）を `ocr_number` / `digit_threshold` にも適用する。
+
+#### `gui/flow.py`
+
+- `_cond_to_dict`: `ocr_number` / `digit_threshold` の `consecutive > 1` のときだけ JSON に書き出す（1 = デフォルト = 即時発火で、保存しない）
+- `_cond_from_dict`: デフォルト値を型によって分ける
+  - `image_gone` → デフォルト 3（従来通り）
+  - `ocr_number` / `digit_threshold` → デフォルト 1（即時発火。既存 JSON に `consecutive` が無い場合の後方互換）
+
+#### `gui/flow_runner.py`（`WatcherState`）
+
+- `_hit_count: dict[str, int]` を追加（`_miss_count` の逆、ヒット回数のカウンタ）
+- `_run()` の発火判定:
+  - `ocr_number` / `digit_threshold` は条件を満たすたびに `_hit_count` をインクリメント
+  - `_hit_count >= consecutive` で初めて `fires` に追加
+  - 条件を外れたら `_hit_count` をリセット
+  - ログ: `👁 {id} 連続ヒット N/required` / `👁 {id} 条件外れ — カウンタリセット`
+- `mark_fired()` でも `_hit_count` をリセット（ハンドラ実行後に確実にクリア）
+
+#### `gui/watcher_editor.py`
+
+- OCR 条件パネルに「連続検知回数」`QSpinBox`（1〜30、デフォルト 1）を追加
+- ヒント文: "1=即時発火、2以上=N回連続で条件を満たしたとき発火（誤検知対策）"
+- 編集ダイアログで既存ウォッチャーを開いたとき `_prefill()` で値を復元
+
+**ログ出力例（consecutive=3 の場合）:**
+```
+👁 514a6550 連続ヒット 1/3
+👁 514a6550 連続ヒット 2/3
+👁 514a6550 条件外れ — カウンタリセット
+👁 514a6550 連続ヒット 1/3
+👁 514a6550 連続ヒット 2/3
+👁 514a6550 連続ヒット 3/3
+👁 watcher 発火検知: 514a6550 (priority=900)
+```
+
+**設計上の判断:**
+- 「同じ画像を複数回 OCR する」案は Tesseract が決定論的なため効果なし
+- 「2枚スクショする」案はコスト増の割に連続N回判定と同等のため不採用
+- 連続N回判定は既存の `image_gone` 実装と同じ枠組みで実現できるため採用
+
+---
+
 ## 2026-04-24（後半セッション）
 
 ### シーン編集 UI 強化（if_image・画像ステップ周り）
