@@ -237,6 +237,7 @@ class WatcherState:
         self._enabled: list[Watcher] = [w for w in flow.watchers if w.enabled]
         self._last_fired_mono: dict[str, float] = {}  # watcher.id -> time
         self._miss_count: dict[str, int] = {}         # image_gone の連続外れ回数
+        self._hit_count:  dict[str, int] = {}         # ocr_number / digit_threshold の連続ヒット回数
         self._fired_queue: deque[Watcher] = deque()
         self._paused = threading.Event()
         self._stop = threading.Event()
@@ -268,9 +269,10 @@ class WatcherState:
         self._fired_queue.clear()
 
     def mark_fired(self, watcher_id: str) -> None:
-        """ハンドラ終了時に呼ぶ。cooldown の起点と image_gone カウンタをリセット。"""
+        """ハンドラ終了時に呼ぶ。cooldown の起点とカウンタをリセット。"""
         self._last_fired_mono[watcher_id] = time.monotonic()
         self._miss_count[watcher_id] = 0
+        self._hit_count[watcher_id]  = 0
 
     # ------------------------------------------------------------------ impl
     def _run(self) -> None:
@@ -316,6 +318,19 @@ class WatcherState:
                             fires.append(w)
                     else:
                         self._miss_count[w.id] = 0
+                elif w.condition.type in ("ocr_number", "digit_threshold"):
+                    # 連続 N 回ヒットした場合だけ発火。外れたらカウンタリセット
+                    required = max(1, int(w.condition.consecutive or 1))
+                    if single:
+                        self._hit_count[w.id] = self._hit_count.get(w.id, 0) + 1
+                        cnt = self._hit_count[w.id]
+                        self._log(f"  👁 {w.id} 連続ヒット {cnt}/{required}")
+                        if cnt >= required:
+                            fires.append(w)
+                    else:
+                        if self._hit_count.get(w.id, 0) > 0:
+                            self._log(f"  👁 {w.id} 条件外れ — カウンタリセット")
+                        self._hit_count[w.id] = 0
                 else:
                     if single:
                         fires.append(w)

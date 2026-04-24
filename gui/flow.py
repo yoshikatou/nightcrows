@@ -89,23 +89,29 @@ def _cond_to_dict(c: Condition) -> dict[str, Any]:
         d["digits_dir"] = c.digits_dir
         d["op"] = c.op
         d["value"] = c.value
+        if c.consecutive > 1:
+            d["consecutive"] = c.consecutive
     elif c.type == "ocr_number":
         if c.region:
             d["region"] = list(c.region)
         d["ocr_whitelist"] = c.ocr_whitelist
         d["op"] = c.op
         d["value"] = c.value
+        if c.consecutive > 1:
+            d["consecutive"] = c.consecutive
     return d
 
 
 def _cond_from_dict(d: dict[str, Any]) -> Condition:
     t = d.get("type", "image_appear")
+    # image_gone のデフォルトは 3、数値系はJSON未記載なら 1（既存動作を維持）
+    default_consecutive = 3 if t == "image_gone" else 1
     return Condition(
         type=t,
         template=d.get("template", ""),
         region=list(d.get("region", []) or []),
         threshold=float(d.get("threshold", 0.85)),
-        consecutive=int(d.get("consecutive", 3)),
+        consecutive=int(d.get("consecutive", default_consecutive)),
         digits_dir=d.get("digits_dir", ""),
         op=d.get("op", "<="),
         value=int(d.get("value", 0)),

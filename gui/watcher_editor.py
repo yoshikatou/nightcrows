@@ -201,6 +201,15 @@ class _WatcherWizard(QDialog):
         self.ocr_value = QSpinBox(); self.ocr_value.setRange(0, 99999)
         op_row.addWidget(self.ocr_value); op_row.addStretch()
         f_ocr.addRow("発火条件 (数値):", op_row)
+        self.ocr_consecutive = QSpinBox()
+        self.ocr_consecutive.setRange(1, 30)
+        self.ocr_consecutive.setValue(1)
+        self.ocr_consecutive.setSuffix(" 回連続")
+        lbl_cons = QLabel("1=即時発火、2以上=N回連続で条件を満たしたとき発火（誤検知対策）")
+        lbl_cons.setStyleSheet("color:#555; font-size:9px;")
+        lbl_cons.setWordWrap(True)
+        f_ocr.addRow("連続検知回数:", self.ocr_consecutive)
+        f_ocr.addRow("", lbl_cons)
         btn_ocr_test = QPushButton("▶ OCRテスト（手動実行）")
         btn_ocr_test.clicked.connect(self._run_ocr_test)
         f_ocr.addRow("", btn_ocr_test)
@@ -416,7 +425,8 @@ class _WatcherWizard(QDialog):
             cond = Condition(type="ocr_number", region=region,
                              ocr_whitelist=self.ocr_whitelist.text().strip(),
                              op=self.ocr_op.currentData(),
-                             value=self.ocr_value.value())
+                             value=self.ocr_value.value(),
+                             consecutive=self.ocr_consecutive.value())
 
         wid = (self._edit_watcher.id if self._edit_watcher else str(uuid.uuid4())[:8])
         self._result = Watcher(
@@ -460,6 +470,7 @@ class _WatcherWizard(QDialog):
             if idx2 >= 0:
                 self.ocr_op.setCurrentIndex(idx2)
             self.ocr_value.setValue(w.condition.value)
+            self.ocr_consecutive.setValue(max(1, w.condition.consecutive))
 
         self._region = list(w.condition.region) if w.condition.region else []
 
