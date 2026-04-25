@@ -12,7 +12,7 @@ import uuid
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog,
@@ -277,7 +277,7 @@ class _WatcherWizard(QDialog):
                 "デバイスが接続されていません。\n"
                 "メイン画面でデバイスに接続してから実行してください。")
             return
-        self._load_screenshot()
+        self._load_screenshot(keep_region=True)
 
     def _retake_screenshot(self) -> None:
         """OCR確認用: 既存の選択領域を保持したまま再スクショ。"""
@@ -300,8 +300,11 @@ class _WatcherWizard(QDialog):
             self._canvas.set_image(img)
             self._hint.setText("監視したい箇所をドラッグで囲んでください")
             if keep_region and self._region:
-                self._canvas.highlight_region(*self._region)
-                self._run_ocr_test()
+                region = list(self._region)
+                QTimer.singleShot(50, lambda: (
+                    self._canvas.highlight_region(*region),
+                    self._run_ocr_test(),
+                ))
         except Exception as e:
             import traceback
             print(f"[screencap error]\n{traceback.format_exc()}")
@@ -320,6 +323,9 @@ class _WatcherWizard(QDialog):
         self._img = img
         self._canvas.set_image(img)
         self._hint.setText("監視したい箇所をドラッグで囲んでください")
+        if self._region:
+            region = list(self._region)
+            QTimer.singleShot(50, lambda: self._canvas.highlight_region(*region))
 
     def _on_region_selected(self, x: int, y: int, w: int, h: int) -> None:
         self._region = [x, y, w, h]
@@ -480,8 +486,10 @@ class _WatcherWizard(QDialog):
                 self._crop = img
                 self._img  = img
                 self._canvas.set_image(img)
-                if self._region:
-                    self._canvas.highlight_region(*self._region)
+                # テンプレート画像 = 切り抜いた領域そのものなので全体をハイライト
+                h_img, w_img = img.shape[:2]
+                QTimer.singleShot(50, lambda wi=w_img, hi=h_img:
+                    self._canvas.highlight_region(0, 0, wi, hi))
                 pix = _np_to_pixmap(img, 600, 64)
                 self._crop_label.setPixmap(pix)
                 self._crop_label.setText("")

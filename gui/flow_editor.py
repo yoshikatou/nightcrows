@@ -372,6 +372,9 @@ class _TimeLineOverlay(QWidget):
         p.setBrush(red)
         p.setPen(Qt.NoPen)
         p.drawEllipse(0, y - 4, 8, 8)
+        # 時刻ラベル（Python が認識している現在時刻を表示）
+        p.setPen(QPen(red))
+        p.drawText(12, y - 3, now.strftime("%H:%M:%S"))
         p.end()
 
 
@@ -389,6 +392,8 @@ class _ScheduleTable(QTableWidget):
         self._dragging = False
         self._overlay = _TimeLineOverlay(self)
         self.viewport().installEventFilter(self)
+        self.verticalScrollBar().valueChanged.connect(self.refresh_time_line)
+        self.verticalHeader().sectionResized.connect(lambda *_: self.refresh_time_line())
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.viewport() and event.type() == QEvent.Type.Resize:
@@ -571,6 +576,10 @@ class FlowEditorWidget(QWidget):
         lay.addWidget(self._tag_scroll)
 
         self.refresh_watcher_tags()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.table.refresh_time_line()
 
     # -------------------------------------------------------------- 時刻追従
     def _on_time_tick(self) -> None:
@@ -904,6 +913,7 @@ class FlowEditorWidget(QWidget):
         if dlg.exec() == QDialog.Accepted:
             self._refresh_cell(row, col, dlg.get_entries())
             self._autosave()
+            self.table.refresh_time_line()
 
     def _on_cell_drag_moved(self, sr: int, sc: int, dr: int, dc: int) -> None:
         src_item = self.table.item(sr, sc)
@@ -931,6 +941,7 @@ class FlowEditorWidget(QWidget):
             self.table.setItem(sr, sc, ph)
         self._refresh_cell(dr, dc, merged)
         self._autosave()
+        self.table.refresh_time_line()
 
     def _on_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
