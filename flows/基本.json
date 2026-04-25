@@ -14,11 +14,27 @@
       ]
     },
     {
+      "time": "12:55",
+      "target": "BR.json",
+      "repeat": "weekly",
+      "days": [
+        5
+      ]
+    },
+    {
       "time": "13:08",
       "target": "近隣の街でポーション補給.json",
       "repeat": "weekly",
       "days": [
         4
+      ]
+    },
+    {
+      "time": "13:10",
+      "target": "近隣の街でポーション補給.json",
+      "repeat": "weekly",
+      "days": [
+        5
       ]
     },
     {

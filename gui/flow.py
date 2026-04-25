@@ -22,6 +22,7 @@ class ScheduleEntry:
     repeat: str = "daily"            # "daily" | "weekly" | "once"
     days: list[int] = field(default_factory=list)  # 0=月〜6=日  repeat="weekly" のとき使用
     date: str = ""                   # "YYYY-MM-DD"  repeat="once" のとき使用
+    enabled: bool = True             # False にするとスケジュール発火をスキップ
 
 
 # -------------------------------------------------------------- watcher types
@@ -161,6 +162,8 @@ def _schedule_to_dict(s: ScheduleEntry) -> dict[str, Any]:
         d["days"] = list(s.days)
     if s.repeat == "once" and s.date:
         d["date"] = s.date
+    if not s.enabled:
+        d["enabled"] = False
     return d
 
 
@@ -172,6 +175,7 @@ def _schedule_from_dict(d: dict[str, Any]) -> ScheduleEntry:
         repeat=d.get("repeat", "daily"),
         days=list(d.get("days", []) or []),
         date=d.get("date", ""),
+        enabled=bool(d.get("enabled", True)),
     )
 
 

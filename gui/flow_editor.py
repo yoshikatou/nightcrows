@@ -461,6 +461,7 @@ class FlowEditorWidget(QWidget):
         self._mw = main_window
         self._flow: Flow | None = None
         self._flow_path: str | None = None
+        self._copy_buffer: list[dict] | None = None
         self._build_ui()
         self._restore_last_flow()
 
@@ -779,10 +780,13 @@ class FlowEditorWidget(QWidget):
                 if 0 <= col < 7:
                     if entry.target:
                         result[(row, col)].append(
-                            {"time": entry.time, "scene": entry.target}
+                            {"time": entry.time, "scene": entry.target,
+                             "enabled": entry.enabled}
                         )
                     for s in (entry.sequence or []):
-                        result[(row, col)].append({"seq": True, "scene": s})
+                        result[(row, col)].append(
+                            {"seq": True, "scene": s, "enabled": entry.enabled}
+                        )
         return result
 
     def _populate_grid(self) -> None:
@@ -819,23 +823,30 @@ class FlowEditorWidget(QWidget):
         if not real:
             self.table.setItem(row, col, None)
             return
+        disabled = all(not e.get("enabled", True) for e in real)
         lines = []
         for e in real:
             name = os.path.basename(e["scene"]).removesuffix(".json")
-            if e.get("seq"):
-                lines.append(f"→ {name}")
-            else:
-                lines.append(f"{e['time']} {name}")
+            prefix = "→ " if e.get("seq") else f"{e['time']} "
+            mark = "⊘ " if not e.get("enabled", True) else ""
+            lines.append(f"{mark}{prefix}{name}")
         first_scene = next((e["scene"] for e in real if not e.get("seq")), real[0]["scene"])
         item = QTableWidgetItem()
         item.setText("\n".join(lines))
         item.setData(Qt.UserRole, real)
-        item.setBackground(QBrush(_cell_color(first_scene)))
+        if disabled:
+            item.setBackground(QBrush(QColor("#E0E0E0")))
+            item.setForeground(QBrush(QColor("#9E9E9E")))
+        else:
+            item.setBackground(QBrush(_cell_color(first_scene)))
+            item.setForeground(QBrush(QColor("#000000")))
         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        item.setToolTip("\n".join(
-            f"{'→ ' if e.get('seq') else e.get('time','')+'  '}{e['scene']}"
-            for e in real
-        ))
+        tip_lines = []
+        for e in real:
+            prefix = "→ " if e.get("seq") else f"{e.get('time','')}  "
+            state = " 【無効】" if not e.get("enabled", True) else ""
+            tip_lines.append(f"{prefix}{e['scene']}{state}")
+        item.setToolTip("\n".join(tip_lines))
         self.table.setItem(row, col, item)
 
     def _grid_to_schedule(self) -> list[ScheduleEntry]:
@@ -878,6 +889,7 @@ class FlowEditorWidget(QWidget):
                         sequence=g["sequence"],
                         repeat="weekly",
                         days=[col],
+                        enabled=g.get("enabled", True),
                     ))
         return result
 
@@ -927,9 +939,18 @@ class FlowEditorWidget(QWidget):
         entries: list[dict] = item.data(Qt.UserRole) or []
         scenes = [e["scene"] for e in entries if e.get("scene")]
 
+        all_disabled = bool(entries) and all(not e.get("enabled", True) for e in entries)
         menu = QMenu(self)
         act_run = menu.addAction("▶ 今すぐ実行")
-        act_run.setEnabled(bool(scenes))
+        act_run.setEnabled(bool(scenes) and not all_disabled)
+        menu.addSeparator()
+        act_copy = menu.addAction("📋 コピー")
+        act_copy.setEnabled(bool(entries))
+        act_paste = menu.addAction("📌 貼り付け")
+        act_paste.setEnabled(self._copy_buffer is not None)
+        menu.addSeparator()
+        act_toggle = menu.addAction("✓ 有効に戻す" if all_disabled else "⊘ 無効化（スキップ）")
+        act_toggle.setEnabled(bool(entries))
         menu.addSeparator()
         act_clear = menu.addAction("枠をクリア（全エントリ削除）")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -937,6 +958,24 @@ class FlowEditorWidget(QWidget):
         if action == act_run:
             self._mw.runner.run_scenes_now(scenes)
             self._mw.tabs.setCurrentWidget(self._mw.runner)
+        elif action == act_copy:
+            self._copy_buffer = [dict(e) for e in entries]
+        elif action == act_paste:
+            r, c = self.table.row(item), self.table.column(item)
+            import copy
+            pasted = copy.deepcopy(self._copy_buffer)
+            dst_slot = TIME_SLOTS[r]
+            for e in pasted:
+                if not e.get("seq"):
+                    e["time"] = dst_slot
+            self._refresh_cell(r, c, pasted)
+            self._autosave()
+        elif action == act_toggle:
+            r, c = self.table.row(item), self.table.column(item)
+            new_enabled = all_disabled  # 無効→有効、有効→無効
+            toggled = [{**e, "enabled": new_enabled} for e in entries]
+            self._refresh_cell(r, c, toggled)
+            self._autosave()
         elif action == act_clear:
             r, c = self.table.row(item), self.table.column(item)
             self.table.setItem(r, c, None)

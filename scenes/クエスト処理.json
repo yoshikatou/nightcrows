@@ -1,0 +1,113 @@
+{
+  "name": "クエスト処理",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 1,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131053_905358.png"
+    },
+    {
+      "type": "tap",
+      "x": 2543,
+      "y": 57,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131117_446745.png"
+    },
+    {
+      "type": "tap",
+      "x": 2122,
+      "y": 358,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131133_801043.png"
+    },
+    {
+      "type": "tap",
+      "x": 1162,
+      "y": 173,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131151_159026.png"
+    },
+    {
+      "type": "tap",
+      "x": 255,
+      "y": 1138,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131207_865029.png"
+    },
+    {
+      "type": "tap",
+      "x": 2548,
+      "y": 64,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131224_711010.png"
+    },
+    {
+      "type": "tap",
+      "x": 2035,
+      "y": 363,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260425_131250_180729.png"
+    },
+    {
+      "type": "tap",
+      "x": 1537,
+      "y": 892,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    }
+  ]
+}

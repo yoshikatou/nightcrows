@@ -13,7 +13,8 @@
     ],
     "ocr_whitelist": "0123456789",
     "op": "<=",
-    "value": 454
+    "value": 454,
+    "consecutive": 3
   },
   "handler": "近隣の街でポーション補給.json",
   "after": "restart_scene",

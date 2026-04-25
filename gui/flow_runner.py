@@ -58,6 +58,8 @@ def _check_schedule(
 
     candidates: list[tuple[str, int, ScheduleEntry]] = []
     for idx, entry in enumerate(flow.schedule):
+        if not entry.enabled:
+            continue
         if entry.time > current_hm:
             continue
         if entry.repeat == "once":
@@ -361,6 +363,8 @@ def _last_due_scenes(flow: Flow, now: datetime) -> list[str]:
 
     candidates: list[tuple[str, list[str]]] = []
     for entry in flow.schedule:
+        if not entry.enabled:
+            continue
         if entry.time >= current_hm:
             continue
         if entry.repeat == "once" and entry.date != today_str:
