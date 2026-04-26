@@ -1,0 +1,53 @@
+{
+  "name": "長時間操作無し",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 1,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260426_074417_341276.png"
+    },
+    {
+      "type": "if_image",
+      "template": "templates/tpl_20260426_074431_144758.png",
+      "region": [
+        983,
+        375,
+        750,
+        461
+      ],
+      "threshold": 0.85,
+      "then_steps": [
+        {
+          "type": "tap",
+          "params": {
+            "x": 1375,
+            "y": 761,
+            "duration_ms": 100
+          }
+        },
+        {
+          "type": "wait_fixed",
+          "params": {
+            "seconds": 3.0
+          }
+        },
+        {
+          "type": "call_scene",
+          "params": {
+            "scene": "scenes/ログイン.json"
+          }
+        }
+      ],
+      "else_steps": []
+    }
+  ]
+}

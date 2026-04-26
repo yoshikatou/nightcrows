@@ -6,20 +6,58 @@
   "after_main": "stay",
   "schedule": [
     {
-      "time": "12:55",
+      "time": "00:30",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
+        6
+      ]
+    },
+    {
+      "time": "05:30",
+      "target": "クエスト処理.json",
+      "repeat": "weekly",
+      "days": [
+        6
+      ]
+    },
+    {
+      "time": "08:00",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
+        6
+      ]
+    },
+    {
+      "time": "12:52",
       "target": "BR.json",
       "repeat": "weekly",
       "days": [
         4
-      ]
+      ],
+      "retry_policy": "window",
+      "retry_window_min": 5
     },
     {
-      "time": "12:55",
+      "time": "12:52",
       "target": "BR.json",
       "repeat": "weekly",
       "days": [
         5
-      ]
+      ],
+      "retry_policy": "window",
+      "retry_window_min": 5
+    },
+    {
+      "time": "12:52",
+      "target": "BR.json",
+      "repeat": "weekly",
+      "days": [
+        6
+      ],
+      "retry_policy": "window",
+      "retry_window_min": 5
     },
     {
       "time": "13:08",
@@ -38,11 +76,38 @@
       ]
     },
     {
+      "time": "13:08",
+      "target": "近隣の街でポーション補給.json",
+      "repeat": "weekly",
+      "sequence": [
+        "スケジューラー起動.json"
+      ],
+      "days": [
+        6
+      ]
+    },
+    {
       "time": "15:00",
       "target": "激戦地2 80LV.json",
       "repeat": "weekly",
       "days": [
         4
+      ]
+    },
+    {
+      "time": "15:00",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
+        5
+      ]
+    },
+    {
+      "time": "15:00",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
+        6
       ]
     }
   ],

@@ -26,6 +26,7 @@ from .flow import (Condition, Watcher,
                    load_watcher, save_watcher, load_watchers_dir,
                    load_watchers)   # load_watchers は旧形式移行用
 from .ocr_test_dialog import ImageCanvas
+from .watcher_test_dialog import WatcherTestDialog
 
 WATCHERS_DIR = "watchers"
 TEMPLATES_DIR = "templates"
@@ -40,6 +41,7 @@ _COND_LABELS = {
 _AFTER_LABELS = {
     "restart_scene": "現在のシーンを最初からやり直す",
     "next_scene":    "次のシーンへ進む",
+    "noop":          "何もしない",
     "stop":          "フローを停止する",
 }
 
@@ -235,6 +237,10 @@ class _WatcherWizard(QDialog):
         self.after_combo = QComboBox()
         for key, label in _AFTER_LABELS.items():
             self.after_combo.addItem(label, key)
+        # 新規ウォッチャーのデフォルトは「何もしない」（編集時は _prefill で上書き）
+        _idx_noop = self.after_combo.findData("noop")
+        if _idx_noop >= 0:
+            self.after_combo.setCurrentIndex(_idx_noop)
         act_lay.addRow("完了後:", self.after_combo)
         self.cooldown_spin = QDoubleSpinBox()
         self.cooldown_spin.setRange(0, 3600); self.cooldown_spin.setSingleStep(1.0)
@@ -554,6 +560,12 @@ class WatcherEditorWidget(QWidget):
         for b in (self.btn_add, self.btn_edit, self.btn_del,
                   self.btn_up, self.btn_down, self.btn_toggle):
             btn_row.addWidget(b)
+        btn_row.addStretch()
+        self.btn_test = QPushButton("🧪 一括テスト")
+        self.btn_test.setToolTip(
+            "スクショ or 画像 1 枚に対して全ウォッチャーのスコアを並べる（誤発火検証）"
+        )
+        btn_row.addWidget(self.btn_test)
         lay.addLayout(btn_row)
 
         self.btn_add.clicked.connect(self._add)
@@ -562,6 +574,7 @@ class WatcherEditorWidget(QWidget):
         self.btn_up.clicked.connect(self._move_up)
         self.btn_down.clicked.connect(self._move_down)
         self.btn_toggle.clicked.connect(self._toggle_enabled)
+        self.btn_test.clicked.connect(self._run_bulk_test)
         self.list.currentRowChanged.connect(self._on_selection_changed)
         self.list.itemDoubleClicked.connect(lambda _: self._edit())
         self._on_selection_changed(-1)
@@ -762,6 +775,19 @@ class WatcherEditorWidget(QWidget):
         self.list.insertItem(row, self._make_item(w))
         self.list.setCurrentRow(row)
         self.watchers_changed.emit()
+
+    def _run_bulk_test(self) -> None:
+        if not self._watchers:
+            QMessageBox.information(
+                self, "情報", "テストするウォッチャーがありません"
+            )
+            return
+        dlg = WatcherTestDialog(
+            watchers=self._watchers,
+            serial=self._mw.current_serial,
+            parent=self,
+        )
+        dlg.exec()
 
     def toggle_watcher_by_id(self, watcher_id: str, enabled: bool) -> None:
         """フローエディタのタグからの有効/無効切替。"""

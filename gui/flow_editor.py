@@ -16,11 +16,11 @@ from datetime import datetime as _dt
 from PySide6.QtCore import Qt, QEvent, QPoint, QTime, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox,
+    QAbstractItemView, QButtonGroup, QCheckBox,
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QHeaderView,
+    QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
+    QPushButton, QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem,
     QTimeEdit, QVBoxLayout, QWidget,
 )
 
@@ -122,10 +122,11 @@ class _TimedEntryDialog(QDialog):
     """時刻とシーンを選択するダイアログ（時間指定エントリ用）。"""
 
     def __init__(self, slot_time: str, scene: str = "", exact_time: str = "",
+                 retry_policy: str = "always", retry_window_min: int = 0,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("時間指定エントリ")
-        self.setMinimumSize(400, 460)
+        self.setMinimumSize(440, 540)
 
         lay = QVBoxLayout(self)
         form = QFormLayout()
@@ -144,6 +145,39 @@ class _TimedEntryDialog(QDialog):
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(self._on_ok)
         lay.addWidget(self.list, 1)
+
+        # ウォッチャー復帰ポリシー
+        grp = QGroupBox("ウォッチャー復帰の扱い")
+        gv = QVBoxLayout(grp)
+        self._rb_always = QRadioButton("いつでも再実行可（既定）")
+        self._rb_once   = QRadioButton("1回限り（一度走ったら以後復帰させない）")
+        win_row = QHBoxLayout()
+        self._rb_window = QRadioButton("起動時刻から")
+        self._win_spin  = QSpinBox()
+        self._win_spin.setRange(1, 1440)
+        self._win_spin.setSuffix(" 分以内のみ再実行可")
+        win_row.addWidget(self._rb_window)
+        win_row.addWidget(self._win_spin)
+        win_row.addStretch()
+        bg = QButtonGroup(self)
+        bg.addButton(self._rb_always, 0)
+        bg.addButton(self._rb_once, 1)
+        bg.addButton(self._rb_window, 2)
+        gv.addWidget(self._rb_always)
+        gv.addWidget(self._rb_once)
+        gv.addLayout(win_row)
+        lay.addWidget(grp)
+
+        # 初期値
+        if retry_policy == "once":
+            self._rb_once.setChecked(True)
+        elif retry_policy == "window":
+            self._rb_window.setChecked(True)
+        else:
+            self._rb_always.setChecked(True)
+        self._win_spin.setValue(retry_window_min if retry_window_min > 0 else 30)
+        self._win_spin.setEnabled(retry_policy == "window")
+        self._rb_window.toggled.connect(self._win_spin.setEnabled)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._on_ok)
@@ -187,9 +221,30 @@ class _TimedEntryDialog(QDialog):
             self.list.currentItem().text() if self.list.currentItem() else ""
         )
 
+    def get_retry_policy(self) -> str:
+        if self._rb_once.isChecked():
+            return "once"
+        if self._rb_window.isChecked():
+            return "window"
+        return "always"
+
+    def get_retry_window_min(self) -> int:
+        return int(self._win_spin.value()) if self._rb_window.isChecked() else 0
+
 
 # ------------------------------------------------------------------ スロット管理ダイアログ
 _SEQ_FG = QColor("#1565C0")   # 続き実行エントリの文字色（青）
+
+
+def _retry_marker(entry: dict) -> str:
+    """ウォッチャー復帰ポリシーの短いマーカー文字列。デフォルトは空。"""
+    p = entry.get("retry_policy", "always")
+    if p == "once":
+        return "🚫1回"
+    if p == "window":
+        m = int(entry.get("retry_window_min", 0))
+        return f"⏱{m}m"
+    return ""
 
 
 class _SlotEntriesDialog(QDialog):
@@ -217,6 +272,9 @@ class _SlotEntriesDialog(QDialog):
 
         self.list = QListWidget()
         self.list.setAlternatingRowColors(True)
+        self.list.setStyleSheet(
+            "QListWidget::item:selected { background: #1565c0; color: white; }"
+        )
         self.list.currentRowChanged.connect(self._on_sel)
         lay.addWidget(self.list, 1)
 
@@ -249,7 +307,9 @@ class _SlotEntriesDialog(QDialog):
         name = os.path.basename(e["scene"]).removesuffix(".json")
         if e.get("seq"):
             return f"  → {name}  （続きで実行）"
-        return f"🕐 {e['time']}  {name}"
+        marker = _retry_marker(e)
+        prefix = f"{marker} " if marker else ""
+        return f"🕐 {e['time']}  {prefix}{name}"
 
     def _refresh(self) -> None:
         row = self.list.currentRow()
@@ -277,7 +337,13 @@ class _SlotEntriesDialog(QDialog):
         if dlg.exec() == QDialog.Accepted:
             t, scene = dlg.get_values()
             if scene:
-                self._entries.append({"time": t, "scene": scene})
+                entry = {"time": t, "scene": scene}
+                policy = dlg.get_retry_policy()
+                if policy != "always":
+                    entry["retry_policy"] = policy
+                    if policy == "window":
+                        entry["retry_window_min"] = dlg.get_retry_window_min()
+                self._entries.append(entry)
                 self._refresh()
                 self.list.setCurrentRow(len(self._entries) - 1)
 
@@ -300,13 +366,26 @@ class _SlotEntriesDialog(QDialog):
                 self._entries[row] = {"seq": True, "scene": dlg.selected()}
                 self._refresh()
         else:
-            dlg = _TimedEntryDialog(slot_time=self._slot_time,
-                                    scene=e["scene"], exact_time=e["time"],
-                                    parent=self)
+            dlg = _TimedEntryDialog(
+                slot_time=self._slot_time,
+                scene=e["scene"], exact_time=e["time"],
+                retry_policy=e.get("retry_policy", "always"),
+                retry_window_min=int(e.get("retry_window_min", 0)),
+                parent=self,
+            )
             if dlg.exec() == QDialog.Accepted:
                 t, scene = dlg.get_values()
                 if scene:
-                    self._entries[row] = {"time": t, "scene": scene}
+                    new_entry = {"time": t, "scene": scene}
+                    policy = dlg.get_retry_policy()
+                    if policy != "always":
+                        new_entry["retry_policy"] = policy
+                        if policy == "window":
+                            new_entry["retry_window_min"] = dlg.get_retry_window_min()
+                    # enabled フラグは保持
+                    if "enabled" in e:
+                        new_entry["enabled"] = e["enabled"]
+                    self._entries[row] = new_entry
                     self._refresh()
 
     def _move_up(self) -> None:
@@ -350,16 +429,20 @@ class _TimeLineOverlay(QWidget):
 
     def paintEvent(self, _event) -> None:
         now = _dt.now()
-        total_min = now.hour * 60 + now.minute
-        row_idx = total_min // _SLOT_MIN
+        total_sec = now.hour * 3600 + now.minute * 60 + now.second
+        slot_sec = _SLOT_MIN * 60
+        row_idx = total_sec // slot_sec
         if row_idx >= self._table.rowCount():
             return
-        fraction = (total_min % _SLOT_MIN) / _SLOT_MIN
+        fraction = (total_sec % slot_sec) / slot_sec
 
-        rect = self._table.visualRect(self._table.model().index(row_idx, 0))
-        if not rect.isValid():
+        # visualRect() は編集中セルなどで歪むことがあるので
+        # rowViewportPosition / rowHeight を直接使う
+        y_top = self._table.rowViewportPosition(row_idx)
+        h = self._table.rowHeight(row_idx)
+        if h <= 0:
             return
-        y = rect.top() + int(fraction * rect.height())
+        y = y_top + int(fraction * h)
         if y < 0 or y > self.height():
             return
 
@@ -372,7 +455,6 @@ class _TimeLineOverlay(QWidget):
         p.setBrush(red)
         p.setPen(Qt.NoPen)
         p.drawEllipse(0, y - 4, 8, 8)
-        # 時刻ラベル（Python が認識している現在時刻を表示）
         p.setPen(QPen(red))
         p.drawText(12, y - 3, now.strftime("%H:%M:%S"))
         p.end()
@@ -390,6 +472,7 @@ class _ScheduleTable(QTableWidget):
         self._drag_src: tuple[int, int] | None = None
         self._drag_start_pos: QPoint | None = None
         self._dragging = False
+        self._just_dragged = False   # ドラッグ完了直後のクリック発火を抑制
         self._overlay = _TimeLineOverlay(self)
         self.viewport().installEventFilter(self)
         self.verticalScrollBar().valueChanged.connect(self.refresh_time_line)
@@ -402,6 +485,9 @@ class _ScheduleTable(QTableWidget):
         return super().eventFilter(obj, event)
 
     def refresh_time_line(self) -> None:
+        # 編集モード等でビューポートサイズが変わった直後でも
+        # オーバーレイがズレないよう毎回ジオメトリを同期する
+        self._overlay.setGeometry(self.viewport().rect())
         self._overlay.raise_()
         self._overlay.update()
 
@@ -416,16 +502,15 @@ class _ScheduleTable(QTableWidget):
             )
 
     def mousePressEvent(self, event):
+        # ドラッグ追跡用にエントリ入りセルの位置を記録するが、
+        # Qt の選択／クリック検出を壊さないために super() は常に呼ぶ。
         if event.button() == Qt.LeftButton:
             pos = event.position().toPoint()
             item = self.itemAt(pos)
-            if item is not None:
-                entries = item.data(Qt.UserRole)
-                if entries:
-                    self._drag_src = (self.row(item), self.column(item))
-                    self._drag_start_pos = pos
-                    self._dragging = False
-                    return
+            if item is not None and item.data(Qt.UserRole):
+                self._drag_src = (self.row(item), self.column(item))
+                self._drag_start_pos = pos
+                self._dragging = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -447,11 +532,8 @@ class _ScheduleTable(QTableWidget):
                     if (sr, sc) != (dst_row, dst_col):
                         self.cell_drag_moved.emit(sr, sc, dst_row, dst_col)
                 self.unsetCursor()
-                self._drag_src = None
-                self._drag_start_pos = None
-                self._dragging = False
-                return
-            self.unsetCursor()
+                # ドラッグだったので直後の cellClicked を抑制
+                self._just_dragged = True
             self._drag_src = None
             self._drag_start_pos = None
             self._dragging = False
@@ -516,7 +598,11 @@ class FlowEditorWidget(QWidget):
         self.table.setVerticalHeaderLabels(TIME_SLOTS)
 
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.Stretch)
+        hh.setSectionResizeMode(QHeaderView.Interactive)
+        hh.setDefaultSectionSize(150)
+        hh.setMinimumSectionSize(80)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
 
         vh = self.table.verticalHeader()
         vh.setDefaultSectionSize(26)
@@ -788,10 +874,15 @@ class FlowEditorWidget(QWidget):
             for col in cols:
                 if 0 <= col < 7:
                     if entry.target:
-                        result[(row, col)].append(
-                            {"time": entry.time, "scene": entry.target,
-                             "enabled": entry.enabled}
-                        )
+                        timed: dict = {
+                            "time": entry.time, "scene": entry.target,
+                            "enabled": entry.enabled,
+                        }
+                        if entry.retry_policy and entry.retry_policy != "always":
+                            timed["retry_policy"] = entry.retry_policy
+                            if entry.retry_policy == "window":
+                                timed["retry_window_min"] = int(entry.retry_window_min)
+                        result[(row, col)].append(timed)
                     for s in (entry.sequence or []):
                         result[(row, col)].append(
                             {"seq": True, "scene": s, "enabled": entry.enabled}
@@ -838,7 +929,9 @@ class FlowEditorWidget(QWidget):
             name = os.path.basename(e["scene"]).removesuffix(".json")
             prefix = "→ " if e.get("seq") else f"{e['time']} "
             mark = "⊘ " if not e.get("enabled", True) else ""
-            lines.append(f"{mark}{prefix}{name}")
+            rmark = _retry_marker(e)
+            rprefix = f"{rmark} " if rmark else ""
+            lines.append(f"{mark}{prefix}{rprefix}{name}")
         first_scene = next((e["scene"] for e in real if not e.get("seq")), real[0]["scene"])
         item = QTableWidgetItem()
         item.setText("\n".join(lines))
@@ -873,7 +966,7 @@ class FlowEditorWidget(QWidget):
                 if not entries:
                     continue
                 # timed エントリを起点にグループ化
-                groups: list[dict] = []  # {"time", "target", "sequence"}
+                groups: list[dict] = []  # {"time", "target", "sequence", "retry_*"}
                 for e in entries:
                     if e.get("seq"):
                         if groups:
@@ -884,12 +977,16 @@ class FlowEditorWidget(QWidget):
                                 "time": TIME_SLOTS[row],
                                 "target": e["scene"],
                                 "sequence": [],
+                                "retry_policy": "always",
+                                "retry_window_min": 0,
                             })
                     else:
                         groups.append({
                             "time": e["time"],
                             "target": e["scene"],
                             "sequence": [],
+                            "retry_policy": e.get("retry_policy", "always"),
+                            "retry_window_min": int(e.get("retry_window_min", 0)),
                         })
                 for g in groups:
                     result.append(ScheduleEntry(
@@ -899,11 +996,17 @@ class FlowEditorWidget(QWidget):
                         repeat="weekly",
                         days=[col],
                         enabled=g.get("enabled", True),
+                        retry_policy=g.get("retry_policy", "always"),
+                        retry_window_min=int(g.get("retry_window_min", 0)),
                     ))
         return result
 
     # --------------------------------------------------------------- イベント
     def _on_cell_clicked(self, row: int, col: int) -> None:
+        # ドラッグ完了直後のクリックを無視（ドラッグ後にダイアログを開かない）
+        if getattr(self.table, "_just_dragged", False):
+            self.table._just_dragged = False
+            return
         if not self._flow:
             QMessageBox.information(self, "情報", "先にフローを開くか新規作成してください")
             return
@@ -949,9 +1052,12 @@ class FlowEditorWidget(QWidget):
             return
         entries: list[dict] = item.data(Qt.UserRole) or []
         scenes = [e["scene"] for e in entries if e.get("scene")]
+        r, c = self.table.row(item), self.table.column(item)
 
         all_disabled = bool(entries) and all(not e.get("enabled", True) for e in entries)
         menu = QMenu(self)
+        act_edit = menu.addAction("✎ 編集")
+        menu.addSeparator()
         act_run = menu.addAction("▶ 今すぐ実行")
         act_run.setEnabled(bool(scenes) and not all_disabled)
         menu.addSeparator()
@@ -966,6 +1072,9 @@ class FlowEditorWidget(QWidget):
         act_clear = menu.addAction("枠をクリア（全エントリ削除）")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
 
+        if action == act_edit:
+            self._on_cell_clicked(r, c)
+            return
         if action == act_run:
             self._mw.runner.run_scenes_now(scenes)
             self._mw.tabs.setCurrentWidget(self._mw.runner)

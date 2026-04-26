@@ -11,11 +11,16 @@ from PySide6.QtWidgets import (
     QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
+import os
 import subprocess
-from .adb import adb_disconnect, adb_ping, connect_usb, discover_and_connect, is_usb_serial, launch_scrcpy
+from datetime import datetime
+from .adb import adb_disconnect, adb_ping, connect_usb, discover_and_connect, get_battery_info, is_usb_serial, launch_scrcpy
+from .battery import BatteryIndicator
 from .connection_diag_dialog import ConnectionDiagDialog
+from .screen_recorder import ScreenRecorder
 from .flow_editor import FlowEditorWidget
 from .maintenance_dialog import MaintenanceDialog
+from .recorder_widget import RecorderWidget
 from .runner_widget import RunnerWidget
 from .scene_editor import SceneEditorWidget
 from .watcher_editor import WatcherEditorWidget
@@ -28,6 +33,7 @@ _WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
 class MainWindow(QMainWindow):
     connect_result_signal = Signal(bool, str, str)   # ok, serial, message
     scrcpy_exited_signal  = Signal(int)              # exit code
+    battery_signal        = Signal(int, bool)        # level (-1 = 未取得), charging
 
     def __init__(self) -> None:
         super().__init__()
@@ -38,6 +44,7 @@ class MainWindow(QMainWindow):
         self.current_serial: str | None = None
         self.connect_stop = threading.Event()
         self.scrcpy_proc: subprocess.Popen | None = None
+        self._realtime_recorder: ScreenRecorder | None = None
 
         self._build_ui()
         self._reload_device_combo()
@@ -45,12 +52,18 @@ class MainWindow(QMainWindow):
 
         self.connect_result_signal.connect(self._on_connect_result)
         self.scrcpy_exited_signal.connect(self._on_scrcpy_exited)
+        self.battery_signal.connect(self._on_battery)
         self.scene_editor.scene_path_changed.connect(self._on_scene_path_changed)
 
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._tick_clock)
         self._clock_timer.start(1000)
         self._tick_clock()
+
+        self._battery_timer = QTimer(self)
+        self._battery_timer.timeout.connect(self._refresh_battery)
+        self._battery_timer.start(30_000)
+        self._refresh_battery()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -90,6 +103,8 @@ class MainWindow(QMainWindow):
         self.clock_label = QLabel()
         self.clock_label.setStyleSheet("padding-left: 4px; color: #333;")
         clock_row.addWidget(self.clock_label)
+        self.battery_widget = BatteryIndicator()
+        clock_row.addWidget(self.battery_widget)
         clock_row.addStretch()
         self.btn_run = QPushButton("▶ 開始")
         self.btn_run.setFixedWidth(80)
@@ -113,6 +128,19 @@ class MainWindow(QMainWindow):
         clock_row.addWidget(self.btn_run)
         clock_row.addWidget(self.btn_run_stop)
         clock_row.addWidget(self.runner_status_label)
+
+        # 録画ボタン（2つ）
+        self.btn_rec_sched = QPushButton("📹 録画")
+        self.btn_rec_sched.setToolTip("録画タブの設定で長時間録画 (例: 5分間隔)")
+        self.btn_rec_sched.setFixedWidth(90)
+        self.btn_rec_sched.clicked.connect(self._toggle_scheduled_recording)
+        self.btn_rec_realtime = QPushButton("🔴 リアル")
+        self.btn_rec_realtime.setToolTip("PVP/ダンジョン用の即時録画 (2秒間隔, recordings/realtime/<時刻>/)")
+        self.btn_rec_realtime.setFixedWidth(90)
+        self.btn_rec_realtime.clicked.connect(self._toggle_realtime_recording)
+        clock_row.addWidget(self.btn_rec_sched)
+        clock_row.addWidget(self.btn_rec_realtime)
+        self._update_rec_buttons()
         root.addLayout(clock_row)
 
         self.status_label = QLabel("未接続")
@@ -125,13 +153,16 @@ class MainWindow(QMainWindow):
         self.flow_editor = FlowEditorWidget(self)
         self.watcher_editor = WatcherEditorWidget(self)
         self.runner = RunnerWidget(self)
+        self.recorder = RecorderWidget(self)
         self.tabs.addTab(self.scene_editor, "シーン編集")
         self.tabs.addTab(self.flow_editor, "フロー編集")
         self.tabs.addTab(self.watcher_editor, "ウォッチャー")
         self.tabs.addTab(self.runner, "実行ログ")
+        self.tabs.addTab(self.recorder, "録画")
         root.addWidget(self.tabs, 1)
 
         self.runner.state_changed.connect(self._on_runner_state_changed)
+        self.recorder.state_changed.connect(self._on_recorder_state_changed)
         self.watcher_editor.watchers_changed.connect(self.flow_editor.refresh_watcher_tags)
 
         self.setCentralWidget(central)
@@ -270,6 +301,7 @@ class MainWindow(QMainWindow):
             )
             self.btn_disconnect.setEnabled(False)
             self.btn_disconnect.setStyleSheet("")
+        self._refresh_battery()
 
     # --------------------------------------------------------- device combo
     def _reload_device_combo(self) -> None:
@@ -350,6 +382,94 @@ class MainWindow(QMainWindow):
         else:
             self._set_connected(None)
 
+    # ---------------------------------------------------------------- recording
+    _REC_STYLE_IDLE = (
+        "QPushButton{background:#37474f;color:white;font-weight:bold;}"
+        "QPushButton:hover{background:#263238;}"
+    )
+    _REC_STYLE_ACTIVE = (
+        "QPushButton{background:#c62828;color:white;font-weight:bold;}"
+        "QPushButton:hover{background:#b71c1c;}"
+    )
+
+    def _update_rec_buttons(self) -> None:
+        # スケジュール録画ボタン
+        sched_on = self.recorder.is_recording() if hasattr(self, "recorder") else False
+        self.btn_rec_sched.setStyleSheet(
+            self._REC_STYLE_ACTIVE if sched_on else self._REC_STYLE_IDLE
+        )
+        self.btn_rec_sched.setText("■ 録画停止" if sched_on else "📹 録画")
+        # リアル録画ボタン
+        rt_on = self._realtime_recorder is not None and self._realtime_recorder.is_running()
+        self.btn_rec_realtime.setStyleSheet(
+            self._REC_STYLE_ACTIVE if rt_on else self._REC_STYLE_IDLE
+        )
+        self.btn_rec_realtime.setText("■ リアル停止" if rt_on else "🔴 リアル")
+
+    def _toggle_scheduled_recording(self) -> None:
+        if self.recorder.is_recording():
+            self.recorder.stop_recording()
+        else:
+            self.recorder.start_recording()
+        self._update_rec_buttons()
+
+    def _on_recorder_state_changed(self, _is_running: bool) -> None:
+        # タブ側 or 自動停止で状態が変わったときに上部ボタンを同期
+        self._update_rec_buttons()
+
+    def _toggle_realtime_recording(self) -> None:
+        if self._realtime_recorder is not None and self._realtime_recorder.is_running():
+            self._realtime_recorder.stop()
+            self._update_rec_buttons()
+            return
+        if not self.current_serial:
+            QMessageBox.information(self, "情報", "先にデバイスに接続してください")
+            return
+        ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out_dir = os.path.join("recordings", "realtime", ts).replace("\\", "/")
+        os.makedirs(out_dir, exist_ok=True)
+        quality = self.settings.recording.jpeg_quality if self.settings.recording else 85
+        self._realtime_recorder = ScreenRecorder(
+            serial=self.current_serial,
+            out_dir=out_dir,
+            interval_s=2.0,
+            jpeg_quality=quality,
+            auto_stop_at=None,
+            log_fn=lambda m: self.recorder._log(m),
+        )
+        self._realtime_recorder.start()
+        self.recorder._log(f"リアル録画開始: {out_dir}  間隔 2秒  品質 {quality}")
+        self._update_rec_buttons()
+        # 自動停止検知のため定期的にボタン状態を再確認
+        QTimer.singleShot(1000, self._poll_realtime_state)
+
+    def _poll_realtime_state(self) -> None:
+        if self._realtime_recorder is None:
+            return
+        if not self._realtime_recorder.is_running():
+            self._update_rec_buttons()
+            return
+        QTimer.singleShot(1000, self._poll_realtime_state)
+
+    # ---------------------------------------------------------------- battery
+    def _refresh_battery(self) -> None:
+        serial = self.current_serial
+        if not serial:
+            self.battery_widget.set_battery(None, False)
+            return
+
+        def _w():
+            info = get_battery_info(serial)
+            if info is None:
+                self.battery_signal.emit(-1, False)
+            else:
+                self.battery_signal.emit(int(info["level"]), bool(info["charging"]))
+
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _on_battery(self, level: int, charging: bool) -> None:
+        self.battery_widget.set_battery(None if level < 0 else level, charging)
+
     @staticmethod
     def _apply_tesseract_cmd(cmd: str) -> None:
         try:
@@ -380,6 +500,9 @@ class MainWindow(QMainWindow):
                 pass
         self.scene_editor.shutdown()
         self.runner.shutdown()
+        self.recorder.shutdown()
+        if self._realtime_recorder is not None:
+            self._realtime_recorder.stop()
         super().closeEvent(event)
 
 

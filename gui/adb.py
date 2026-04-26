@@ -355,6 +355,43 @@ def launch_scrcpy(serial: str) -> subprocess.Popen:
     )
 
 
+def get_battery_info(serial: str, timeout: float = 3.0) -> dict | None:
+    """`adb shell dumpsys battery` で電池情報を取得する。
+
+    Returns:
+        {"level": int 0-100, "charging": bool} か、取得失敗時は None。
+    """
+    try:
+        r = subprocess.run(
+            [ADB, "-s", serial, "shell", "dumpsys", "battery"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    info: dict[str, str] = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        info[k.strip().lower()] = v.strip()
+    try:
+        level = int(info.get("level", "-1"))
+    except ValueError:
+        level = -1
+    if level < 0:
+        return None
+    # status: 2=CHARGING, 5=FULL  (Android BatteryManager)
+    status = info.get("status", "")
+    charging = status in ("2", "5") or any(
+        info.get(k, "false").lower() == "true"
+        for k in ("ac powered", "usb powered", "wireless powered")
+    )
+    return {"level": max(0, min(100, level)), "charging": charging}
+
+
 def get_rotation_and_size(serial: str) -> tuple[int, int, int]:
     """(rotation, phys_w, phys_h) を返す。tap_record.py と同じロジック。"""
     phys_w, phys_h = 1220, 2712

@@ -8,14 +8,16 @@ from datetime import datetime
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .adb import get_rotation_and_size, screencap
 from .canvas import SnapshotCanvas
+from .flow import Condition, Watcher, save_watcher
 from .recorder import TapRecorder
 from .replay import replay_scene
 from .scene import Scene, Step, load_scene, save_scene
@@ -24,6 +26,7 @@ from .scroll_dialog import ScrollDialog
 TEMPLATES_DIR = "templates"
 SNAPSHOTS_DIR = os.path.join(TEMPLATES_DIR, "snapshots")
 SCENES_DIR = "scenes"
+WATCHERS_DIR = "watchers"
 
 _KEYEVENTS: list[tuple[str, str]] = [
     ("戻る (BACK)",               "KEYCODE_BACK"),
@@ -140,9 +143,11 @@ class _SimpleBranchEditor(QWidget):
     """if_image の then/else 各ブランチのステップを編集するウィジェット。"""
     steps_changed = Signal()
 
-    def __init__(self, label: str, steps: list[dict], parent=None) -> None:
+    def __init__(self, label: str, steps: list[dict],
+                 serial: str | None = None, parent=None) -> None:
         super().__init__(parent)
         self._steps: list[dict] = [dict(s) for s in steps]
+        self._serial = serial
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -156,7 +161,9 @@ class _SimpleBranchEditor(QWidget):
         add_row = QHBoxLayout()
         for lbl, fn in [("👆 タップ", self._add_tap),
                          ("⏱ 待ち", self._add_wait),
-                         ("🔑 キー", self._add_key)]:
+                         ("🔑 キー", self._add_key),
+                         ("📷 スナップ", self._add_snapshot),
+                         ("📂 シーン呼出", self._add_call_scene)]:
             b = QPushButton(lbl); b.clicked.connect(fn); add_row.addWidget(b)
         add_row.addStretch()
         lay.addLayout(add_row)
@@ -179,6 +186,11 @@ class _SimpleBranchEditor(QWidget):
         if t == "tap":      return f"👆 タップ ({p.get('x')}, {p.get('y')})"
         if t == "wait_fixed": return f"⏱ 待ち {p.get('seconds')}s"
         if t == "keyevent": return f"🔑 {next((l for l,c in _KEYEVENTS if c==p.get('keycode')), p.get('keycode',''))}"
+        if t == "snapshot": return f"📷 スナップ {os.path.basename(p.get('path', ''))}"
+        if t == "call_scene":
+            sub = p.get("scene", "")
+            name = os.path.splitext(os.path.basename(sub))[0] if sub else "(未設定)"
+            return f"📂 シーン呼出  {name}"
         return f"{t} {p}"
 
     def _refresh(self) -> None:
@@ -227,6 +239,35 @@ class _SimpleBranchEditor(QWidget):
         if dlg.exec() == QDialog.Accepted:
             self._steps.append({"type": "keyevent", "params": {"keycode": cb.currentData()}})
             self._refresh(); self.list.setCurrentRow(len(self._steps) - 1)
+
+    def _add_snapshot(self) -> None:
+        if not self._serial:
+            QMessageBox.information(self, "情報", "先にデバイスに接続してください")
+            return
+        try:
+            png = screencap(self._serial)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"スナップショット失敗: {e}")
+            return
+        os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
+        name = f"snap_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        path = os.path.join(SNAPSHOTS_DIR, name).replace("\\", "/")
+        with open(path, "wb") as f:
+            f.write(png)
+        self._steps.append({"type": "snapshot", "params": {"path": path}})
+        self._refresh(); self.list.setCurrentRow(len(self._steps) - 1)
+        self.steps_changed.emit()
+
+    def _add_call_scene(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "呼び出すシーンを選択", SCENES_DIR, "JSON (*.json)"
+        )
+        if not path:
+            return
+        rel = os.path.relpath(path, ".").replace("\\", "/")
+        self._steps.append({"type": "call_scene", "params": {"scene": rel}})
+        self._refresh(); self.list.setCurrentRow(len(self._steps) - 1)
+        self.steps_changed.emit()
 
     def _up(self) -> None:
         r = self.list.currentRow()
@@ -372,77 +413,326 @@ class _PickSceneDialog(QDialog):
         return {"mode": mode, "scenes": scenes, "step_id": self._step_id}
 
 
-class _IfImageBranchDialog(QDialog):
-    """if_image ステップの then/else ブランチをインラインで編集するダイアログ。"""
+class _IfImageToWatcherDialog(QDialog):
+    """if_image の then/else をウォッチャーへ変換するダイアログ。
+
+    生成物:
+      - 各ブランチのステップを `scenes/<name>.json` に新規保存
+      - そのシーンを handler に持つ Watcher を `watchers/<safe>_<id>.json` に保存
+        - then  → image_appear ウォッチャー
+        - else  → image_gone   ウォッチャー
+    """
 
     def __init__(self, step_params: dict,
-                 snapshot: QPixmap | None = None,
+                 then_steps: list[dict], else_steps: list[dict],
+                 parent_scene: Scene | None = None,
                  parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("if_image 分岐編集")
-        self.setMinimumSize(960 if snapshot else 660, 560)
+        self.setWindowTitle("⚡ ウォッチャー化")
+        self.setMinimumWidth(560)
+        self._params = step_params
+        self._then_steps = then_steps
+        self._else_steps = else_steps
+        self._parent_scene = parent_scene
 
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(
+        info = QLabel(
             f"テンプレート: {os.path.basename(step_params.get('template', ''))}\n"
-            "各ブランチにステップを追加してください。ステップが空の場合はその分岐をスキップします。"
-        ))
-
-        main_sp = QSplitter(Qt.Horizontal)
-
-        # スナップショットパネル（左）
-        if snapshot and not snapshot.isNull():
-            snap_w = QWidget()
-            snap_lay = QVBoxLayout(snap_w)
-            snap_lay.setContentsMargins(0, 0, 0, 0)
-            snap_lay.addWidget(QLabel("📍 画像をクリック → then / else にタップ追加"))
-            self._img_label = _ClickableImageLabel()
-            self._img_label.set_pixmap(snapshot)
-            self._img_label.set_region(step_params.get("region"))
-            self._img_label.setMinimumWidth(220)
-            self._img_label.clicked.connect(self._on_snapshot_click)
-            snap_lay.addWidget(self._img_label, 1)
-            main_sp.addWidget(snap_w)
-        else:
-            self._img_label = None
-
-        # ブランチエディタ（右）
-        branch_w = QWidget()
-        branch_lay = QVBoxLayout(branch_w)
-        branch_lay.setContentsMargins(0, 0, 0, 0)
-        branch_sp = QSplitter(Qt.Horizontal)
-        self._then_ed = _SimpleBranchEditor(
-            "🟢 マッチした場合 (then)",
-            step_params.get("then_steps") or []
+            f"判定領域: {step_params.get('region')}    "
+            f"閾値: {step_params.get('threshold', 0.85)}"
         )
-        self._else_ed = _SimpleBranchEditor(
-            "🔴 マッチしなかった場合 (else)",
-            step_params.get("else_steps") or []
-        )
-        branch_sp.addWidget(self._then_ed)
-        branch_sp.addWidget(self._else_ed)
-        branch_lay.addWidget(branch_sp, 1)
-        main_sp.addWidget(branch_w)
+        info.setStyleSheet("color:#444; font-size:11px;")
+        lay.addWidget(info)
 
-        lay.addWidget(main_sp, 1)
+        self._then_chk, self._then_title, self._then_scene = self._build_branch_group(
+            lay, "🟢 then を image_appear ウォッチャーへ",
+            "出現検知", "watcher_appear",
+            enabled=bool(then_steps),
+            empty_hint=("then ブランチが空のため変換できません" if not then_steps else None),
+        )
+        self._else_chk, self._else_title, self._else_scene = self._build_branch_group(
+            lay, "🔴 else を image_gone ウォッチャーへ",
+            "消失検知", "watcher_gone",
+            enabled=bool(else_steps),
+            empty_hint=("else ブランチが空のため変換できません" if not else_steps else None),
+        )
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
-        if self._img_label is not None:
-            self._then_ed.steps_changed.connect(self._refresh_branch_markers)
-            self._else_ed.steps_changed.connect(self._refresh_branch_markers)
-            self._refresh_branch_markers()
+    def _build_branch_group(self, parent_lay: QVBoxLayout, label: str,
+                            default_title: str, default_scene_basename: str,
+                            enabled: bool, empty_hint: str | None) -> tuple[QCheckBox, QLineEdit, QLineEdit]:
+        grp = QGroupBox()
+        gl = QFormLayout(grp)
+        chk = QCheckBox(label)
+        chk.setChecked(enabled)
+        chk.setEnabled(enabled)
+        title_edit = QLineEdit(default_title)
+        scene_edit = QLineEdit(default_scene_basename)
+        scene_edit.setPlaceholderText("（拡張子なしのファイル名）")
+        title_edit.setEnabled(enabled)
+        scene_edit.setEnabled(enabled)
+        gl.addRow(chk)
+        gl.addRow("ウォッチャー名:", title_edit)
+        gl.addRow("シーンファイル名:", scene_edit)
+        if empty_hint:
+            hint = QLabel(empty_hint)
+            hint.setStyleSheet("color:#888; font-size:10px;")
+            gl.addRow(hint)
+        else:
+            chk.toggled.connect(lambda on: (title_edit.setEnabled(on), scene_edit.setEnabled(on)))
+        parent_lay.addWidget(grp)
+        return chk, title_edit, scene_edit
 
-    def _refresh_branch_markers(self) -> None:
-        if self._img_label is None:
-            return
-        self._img_label.set_branch_markers(
-            self._then_ed.get_tap_positions(),
-            self._else_ed.get_tap_positions(),
+    # ---------------- 実行 ----------------
+    def get_plan(self) -> list[dict]:
+        """変換指示を辞書のリストとして返す（accept 後に呼び出す）。
+
+        Returns:
+            [{"cond": "image_appear" | "image_gone",
+              "title": str, "scene_name": str, "steps": list[dict]}, ...]
+        """
+        plan: list[dict] = []
+        if self._then_chk.isEnabled() and self._then_chk.isChecked():
+            plan.append({
+                "cond": "image_appear",
+                "title": self._then_title.text().strip() or "出現検知",
+                "scene_name": self._then_scene.text().strip() or "watcher_appear",
+                "steps": self._then_steps,
+            })
+        if self._else_chk.isEnabled() and self._else_chk.isChecked():
+            plan.append({
+                "cond": "image_gone",
+                "title": self._else_title.text().strip() or "消失検知",
+                "scene_name": self._else_scene.text().strip() or "watcher_gone",
+                "steps": self._else_steps,
+            })
+        return plan
+
+
+def _convert_branch_to_watcher(plan_item: dict, params: dict,
+                               parent_scene: Scene | None) -> tuple[str, str]:
+    """1件の変換を実行し、(scene_path, watcher_path) を返す。"""
+    import uuid as _uuid
+    name = plan_item["scene_name"]
+    if not name.endswith(".json"):
+        name += ".json"
+    scene_path = os.path.join(SCENES_DIR, name).replace("\\", "/")
+
+    steps: list[Step] = [
+        Step(type=d.get("type", ""), params=dict(d.get("params", {})))
+        for d in plan_item["steps"]
+    ]
+    new_scene = Scene(
+        name=os.path.splitext(os.path.basename(scene_path))[0],
+        device_ip=parent_scene.device_ip if parent_scene else "",
+        rotation=parent_scene.rotation if parent_scene else 0,
+        phys_size=parent_scene.phys_size if parent_scene else (1220, 2712),
+        logical_size=parent_scene.logical_size if parent_scene else (1220, 2712),
+        steps=steps,
+    )
+    save_scene(new_scene, scene_path)
+
+    wid = _uuid.uuid4().hex[:8]
+    cond = Condition(
+        type=plan_item["cond"],
+        template=params.get("template", ""),
+        region=list(params.get("region") or []),
+        threshold=float(params.get("threshold", 0.85)),
+    )
+    watcher = Watcher(
+        id=wid,
+        title=plan_item["title"],
+        condition=cond,
+        handler=scene_path,
+    )
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (watcher.title or wid))
+    w_path = os.path.join(WATCHERS_DIR, f"{safe}_{wid}.json")
+    save_watcher(watcher, w_path)
+    return scene_path, w_path
+
+
+class _IfImageBranchDialog(QDialog):
+    """if_image ステップの then/else ブランチをインラインで編集するダイアログ。
+
+    タブ構成:
+      🎯 条件      — 画像トリガの定義（テンプレ・領域）と参照スナップ
+      📋 分岐ステップ — then / else 編集 ＋ 選択ステップに応じたスナップ表示
+    """
+
+    def __init__(self, step_params: dict,
+                 snapshot: QPixmap | None = None,
+                 serial: str | None = None,
+                 main_window=None,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("if_image 分岐編集")
+        self.setMinimumSize(880 if snapshot else 660, 560)
+
+        self._step_params = step_params
+        self._parent_snapshot = snapshot
+        self._main_window = main_window
+        self._pixmap_cache: dict[str, QPixmap] = {}
+        self._active_branch = "then"     # 直近にフォーカスされた分岐
+        self._img_label: _ClickableImageLabel | None = None
+
+        self._then_ed = _SimpleBranchEditor(
+            "🟢 マッチした場合 (then)",
+            step_params.get("then_steps") or [],
+            serial=serial,
+        )
+        self._else_ed = _SimpleBranchEditor(
+            "🔴 マッチしなかった場合 (else)",
+            step_params.get("else_steps") or [],
+            serial=serial,
         )
 
+        lay = QVBoxLayout(self)
+        tabs = QTabWidget()
+        tabs.addTab(self._build_condition_tab(), "🎯 条件")
+        tabs.addTab(self._build_branches_tab(), "📋 分岐ステップ")
+        lay.addWidget(tabs, 1)
+
+        bottom = QHBoxLayout()
+        btn_to_watcher = QPushButton("⚡ ウォッチャー化")
+        btn_to_watcher.setToolTip("then / else をウォッチャーとして登録します")
+        btn_to_watcher.clicked.connect(self._open_to_watcher_dialog)
+        bottom.addWidget(btn_to_watcher)
+        bottom.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        bottom.addWidget(bb)
+        lay.addLayout(bottom)
+
+        # ブランチ編集の変化を画像へ反映
+        if self._img_label is not None:
+            self._then_ed.steps_changed.connect(self._refresh_branch_view)
+            self._else_ed.steps_changed.connect(self._refresh_branch_view)
+            self._then_ed.list.currentRowChanged.connect(
+                lambda _row: self._on_branch_select("then"))
+            self._else_ed.list.currentRowChanged.connect(
+                lambda _row: self._on_branch_select("else"))
+            self._then_ed.list.itemClicked.connect(
+                lambda _it: self._on_branch_select("then"))
+            self._else_ed.list.itemClicked.connect(
+                lambda _it: self._on_branch_select("else"))
+            self._refresh_branch_view()
+
+    # ---------------- tabs ----------------
+    def _build_condition_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        info = QLabel(
+            f"テンプレート: {os.path.basename(self._step_params.get('template', ''))}\n"
+            f"判定領域: {self._step_params.get('region')}\n"
+            f"閾値: {self._step_params.get('threshold', 0.85)}\n"
+            f"タイムアウト: {self._step_params.get('timeout_s', 30)}s"
+        )
+        info.setStyleSheet("color:#444;")
+        v.addWidget(info)
+
+        if self._parent_snapshot and not self._parent_snapshot.isNull():
+            cond_img = _ClickableImageLabel()
+            cond_img.set_pixmap(self._parent_snapshot)
+            cond_img.set_region(self._step_params.get("region"))
+            cond_img.setMinimumWidth(220)
+            v.addWidget(cond_img, 1)
+        else:
+            ph = QLabel("（参照スナップショットなし — シーンに『スナップ更新』で追加してください）")
+            ph.setStyleSheet("color:#888;")
+            v.addWidget(ph, 1)
+
+        return w
+
+    def _build_branches_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        sp = QSplitter(Qt.Horizontal)
+
+        if self._parent_snapshot and not self._parent_snapshot.isNull():
+            snap_w = QWidget()
+            sl = QVBoxLayout(snap_w)
+            sl.setContentsMargins(0, 0, 0, 0)
+            self._snap_caption = QLabel("📍 画像をクリック → then / else にタップ追加")
+            self._snap_caption.setStyleSheet("font-size:11px; color:#444;")
+            sl.addWidget(self._snap_caption)
+            self._img_label = _ClickableImageLabel()
+            self._img_label.set_pixmap(self._parent_snapshot)
+            self._img_label.set_region(self._step_params.get("region"))
+            self._img_label.setMinimumWidth(220)
+            self._img_label.clicked.connect(self._on_snapshot_click)
+            sl.addWidget(self._img_label, 1)
+            sp.addWidget(snap_w)
+
+        branch_w = QWidget()
+        bl = QVBoxLayout(branch_w)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bsp = QSplitter(Qt.Horizontal)
+        bsp.addWidget(self._then_ed)
+        bsp.addWidget(self._else_ed)
+        bl.addWidget(bsp, 1)
+        sp.addWidget(branch_w)
+
+        v.addWidget(sp, 1)
+        return w
+
+    # ---------------- snapshot switching ----------------
+    def _on_branch_select(self, which: str) -> None:
+        self._active_branch = which
+        self._refresh_branch_view()
+
+    @staticmethod
+    def _snapshot_path_for_step(steps: list[dict], idx: int) -> str | None:
+        """idx 以前の最も近い snapshot ステップのパスを返す。"""
+        if idx < 0 or idx >= len(steps):
+            return None
+        for i in range(idx, -1, -1):
+            if steps[i].get("type") == "snapshot":
+                return steps[i].get("params", {}).get("path") or None
+        return None
+
+    def _resolve_snapshot(self) -> tuple[QPixmap | None, bool, str]:
+        """現在の状況に対して (表示する pixmap, 親由来か, キャプション) を返す。"""
+        ed = self._then_ed if self._active_branch == "then" else self._else_ed
+        idx = ed.list.currentRow()
+        steps = ed.get_steps()
+        path = self._snapshot_path_for_step(steps, idx)
+        if path:
+            pm = self._pixmap_cache.get(path)
+            if pm is None:
+                pm = QPixmap(path)
+                if not pm.isNull():
+                    self._pixmap_cache[path] = pm
+            if pm and not pm.isNull():
+                tag = "🟢 then" if self._active_branch == "then" else "🔴 else"
+                return pm, False, f"📷 {tag} ステップ {idx+1} のスナップ — {os.path.basename(path)}"
+        # フォールバック: 親シーンのスナップ
+        return self._parent_snapshot, True, "📍 親スナップ — 画像をクリックで then / else にタップ追加"
+
+    def _refresh_branch_view(self) -> None:
+        if self._img_label is None:
+            return
+        pm, is_parent, caption = self._resolve_snapshot()
+        if pm is not None and not pm.isNull():
+            self._img_label.set_pixmap(pm)
+        # 領域オーバーレイは親スナップ表示時のみ
+        self._img_label.set_region(self._step_params.get("region") if is_parent else None)
+        # タップマーカは親スナップ表示時のみ（座標系の誤解を避ける）
+        if is_parent:
+            self._img_label.set_branch_markers(
+                self._then_ed.get_tap_positions(),
+                self._else_ed.get_tap_positions(),
+            )
+        else:
+            self._img_label.set_branch_markers([], [])
+        self._snap_caption.setText(caption)
+
+    # ---------------- click → add tap ----------------
     def _on_snapshot_click(self, x: int, y: int) -> None:
         menu = QMenu(self)
         act_then = menu.addAction(f"🟢 then に追加  ({x}, {y})")
@@ -452,6 +742,51 @@ class _IfImageBranchDialog(QDialog):
             self._then_ed.add_tap(x, y)
         elif action == act_else:
             self._else_ed.add_tap(x, y)
+
+    # ---------------- to watcher ----------------
+    def _open_to_watcher_dialog(self) -> None:
+        then_steps = self._then_ed.get_steps()
+        else_steps = self._else_ed.get_steps()
+        if not then_steps and not else_steps:
+            QMessageBox.information(
+                self, "情報", "then / else どちらにもステップがありません"
+            )
+            return
+        parent_scene = (self._main_window.scene_editor.scene
+                        if self._main_window is not None else None)
+        dlg = _IfImageToWatcherDialog(
+            self._step_params, then_steps, else_steps,
+            parent_scene=parent_scene, parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        plan = dlg.get_plan()
+        if not plan:
+            return
+
+        created: list[tuple[str, str]] = []
+        try:
+            for item in plan:
+                created.append(_convert_branch_to_watcher(
+                    item, self._step_params, parent_scene
+                ))
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"変換失敗: {e}")
+            return
+
+        # ウォッチャー一覧をリロード（メインウィンドウ経由）
+        if self._main_window is not None:
+            try:
+                we = self._main_window.watcher_editor
+                we._load_from_dir()
+                we.watchers_changed.emit()
+            except Exception:
+                pass
+
+        msg = "\n".join(f"・{os.path.basename(w)}  ←  {os.path.basename(s)}"
+                        for s, w in created)
+        QMessageBox.information(self, "完了",
+                                f"ウォッチャー {len(created)} 件を作成しました\n\n{msg}")
 
     def get_then_steps(self) -> list[dict]: return self._then_ed.get_steps()
     def get_else_steps(self) -> list[dict]: return self._else_ed.get_steps()
@@ -889,7 +1224,9 @@ class SceneEditorWidget(QWidget):
             "template": tpl_path, "region": [x, y, w, h],
             "threshold": 0.85, "then_steps": [], "else_steps": [],
         }
-        dlg = _IfImageBranchDialog(params, snapshot=self.canvas.current_pixmap(), parent=self)
+        dlg = _IfImageBranchDialog(params, snapshot=self.canvas.current_pixmap(),
+                                   serial=self._current_serial(),
+                                   main_window=self._mw, parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
         params["then_steps"] = dlg.get_then_steps()
@@ -1212,7 +1549,9 @@ class SceneEditorWidget(QWidget):
             self._edit_pick_scene(row, step)
 
     def _edit_if_image(self, row: int, step) -> None:
-        dlg = _IfImageBranchDialog(step.params, snapshot=self.canvas.current_pixmap(), parent=self)
+        dlg = _IfImageBranchDialog(step.params, snapshot=self.canvas.current_pixmap(),
+                                   serial=self._current_serial(),
+                                   main_window=self._mw, parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
         step.params["then_steps"] = dlg.get_then_steps()
@@ -1364,6 +1703,14 @@ class SceneEditorWidget(QWidget):
         QMessageBox.warning(self, "記録エラー", msg)
 
     # ----------------------------------------------------------- scene file
+    def _clear_canvas_overlays(self) -> None:
+        """シーン切替時にキャンバスの全オーバーレイ状態をリセットする。"""
+        self.canvas.set_snapshot(None)
+        self.canvas.set_markers([])
+        self.canvas.clear_branch_markers()
+        self.canvas.clear_match_overlay()
+        self.canvas.set_drag_pins(None, None)
+
     def _new_scene(self) -> None:
         if self.scene.steps and not self._confirm_discard():
             return
@@ -1371,6 +1718,7 @@ class SceneEditorWidget(QWidget):
         self.current_scene_path = None
         self._pixmap_cache.clear()
         self.scene_name_edit.setText(self.scene.name)
+        self._clear_canvas_overlays()
         self._refresh_step_list()
         self.scene_path_changed.emit("")
         self._log("新規シーン")
@@ -1421,6 +1769,7 @@ class SceneEditorWidget(QWidget):
         self.scene_name_edit.setText(self.scene.name)
         if self.scene.device_ip:
             self._mw.select_device_by_ip(self.scene.device_ip)
+        self._clear_canvas_overlays()
         self._refresh_step_list()
         self.scene_path_changed.emit(path)
         self._log(f"読込: {path} ({len(self.scene.steps)} 件)")

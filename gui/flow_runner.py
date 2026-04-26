@@ -305,10 +305,11 @@ class WatcherState:
                 # 既にキューにあるものは二重検出しない
                 if any(q.id == w.id for q in self._fired_queue):
                     continue
+                wname = w.title or w.id
                 try:
                     single = _evaluate_condition(w.condition, img)
                 except Exception as e:
-                    self._log(f"  watcher {w.id} 評価エラー: {e}")
+                    self._log(f"  watcher [{wname}] 評価エラー: {e}")
                     continue
 
                 if w.condition.type == "image_gone":
@@ -326,12 +327,12 @@ class WatcherState:
                     if single:
                         self._hit_count[w.id] = self._hit_count.get(w.id, 0) + 1
                         cnt = self._hit_count[w.id]
-                        self._log(f"  👁 {w.id} 連続ヒット {cnt}/{required}")
+                        self._log(f"  👁 [{wname}] 連続ヒット {cnt}/{required}")
                         if cnt >= required:
                             fires.append(w)
                     else:
                         if self._hit_count.get(w.id, 0) > 0:
-                            self._log(f"  👁 {w.id} 条件外れ — カウンタリセット")
+                            self._log(f"  👁 [{wname}] 条件外れ — カウンタリセット")
                         self._hit_count[w.id] = 0
                 else:
                     if single:
@@ -344,15 +345,16 @@ class WatcherState:
                 # 検知時にも last_fired を更新（暫定、handler 終了時に再更新される）
                 self._last_fired_mono[winner.id] = time.monotonic()
                 self._fired_queue.append(winner)
-                self._log(f"  👁 watcher 発火検知: {winner.id} "
+                wname = winner.title or winner.id
+                self._log(f"  👁 watcher 発火検知: [{wname}] "
                           f"(priority={winner.priority})")
 
             time.sleep(self._poll_s)
 
 
 # ============================================================ ヘルパー
-def _last_due_scenes(flow: Flow, now: datetime) -> list[str]:
-    """現在時刻より前で直近のスケジュールエントリのシーンリストを返す。
+def _last_due_scenes(flow: Flow, now: datetime) -> tuple[ScheduleEntry, list[str]] | None:
+    """現在時刻より前で直近のスケジュールエントリ (entry, シーンリスト) を返す。
 
     フロー開始時にスケジュールを全スキップした場合など、まだシーンが実行されて
     いないときの restart_scene フォールバックに使う。
@@ -361,7 +363,7 @@ def _last_due_scenes(flow: Flow, now: datetime) -> list[str]:
     current_hm = now.strftime("%H:%M")
     today_wd = now.weekday()
 
-    candidates: list[tuple[str, list[str]]] = []
+    candidates: list[tuple[str, ScheduleEntry, list[str]]] = []
     for entry in flow.schedule:
         if not entry.enabled:
             continue
@@ -373,18 +375,31 @@ def _last_due_scenes(flow: Flow, now: datetime) -> list[str]:
             continue
         scenes = entry.sequence or ([entry.target] if entry.target else [])
         if scenes:
-            candidates.append((entry.time, list(scenes)))
+            candidates.append((entry.time, entry, list(scenes)))
 
     if not candidates:
-        return []
+        return None
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    _, entry, scenes = candidates[0]
+    return entry, scenes
+
+
+def _entry_started_at(entry: ScheduleEntry, now: datetime) -> datetime:
+    """エントリの「起動基準時刻」 = 今日の entry.time。"""
+    try:
+        h, m = map(int, entry.time.split(":"))
+    except ValueError:
+        return now
+    return datetime.combine(now.date(), datetime.min.time()).replace(hour=h, minute=m)
 
 
 # ============================================================ events
 @dataclass
 class _ScheduleEvent:
-    scenes: list[str]  # 実行するシーンの順序リスト
+    scenes: list[str]                       # 実行するシーンの順序リスト
+    retry_policy: str = "always"            # 親エントリの retry_policy
+    retry_window_min: int = 0               # 親エントリの retry_window_min
+    started_at: datetime | None = None      # 起動基準時刻（window 判定用）
 
 
 @dataclass
@@ -464,14 +479,19 @@ def replay_flow(
             idx, entry = fired
             last_fired_schedule[idx] = datetime.now().date()
             scenes = entry.sequence or ([entry.target] if entry.target else [])
-            pending.append(_ScheduleEvent(scenes=scenes))
+            pending.append(_ScheduleEvent(
+                scenes=scenes,
+                retry_policy=entry.retry_policy,
+                retry_window_min=entry.retry_window_min,
+                started_at=_entry_started_at(entry, datetime.now()),
+            ))
             log(f"📅 スケジュール発火 (step_end 割り込み): "
                 f"{entry.time} → {scenes}")
             return True
         w = watcher_state.pop_fired()
         if w is not None:
             pending.append(_WatcherEvent(watcher=w))
-            log(f"👁 watcher 発火 (step_end 割り込み): {w.id} → {w.handler}")
+            log(f"👁 watcher 発火 (step_end 割り込み): [{w.title or w.id}] → {w.handler}")
             if w.alert_desktop and notify_fn:
                 notify_fn(f"ウォッチャー発火: {w.title}", w.handler or "")
             return True
@@ -493,6 +513,8 @@ def replay_flow(
     current_idx = 0
     main_seq = flow.main_sequence
     last_running_scene: str | None = None   # restart_scene 用：直前に実行したシーンパス
+    # シーン path → 親エントリ由来の retry policy 情報
+    scene_policies: dict[str, dict] = {}
 
     try:
         while not should_stop():
@@ -507,6 +529,14 @@ def replay_flow(
             if pending:
                 event = pending.pop(0)
                 if isinstance(event, _ScheduleEvent):
+                    # 親エントリの policy をシーケンス全シーンに伝搬
+                    started = event.started_at or datetime.now()
+                    for path in event.scenes:
+                        scene_policies[path] = {
+                            "policy": event.retry_policy,
+                            "window_min": event.retry_window_min,
+                            "started_at": started,
+                        }
                     for i, path in enumerate(event.scenes):
                         if should_stop():
                             break
@@ -522,27 +552,56 @@ def replay_flow(
                         watcher_state.mark_fired(w.id)
                         watcher_state.resume()
                     if w.after == "stop":
-                        log(f"watcher {w.id} after=stop のため終了")
+                        log(f"watcher [{w.title or w.id}] after=stop のため終了")
                         return
                     if w.after == "restart_scene" and schedule_only:
                         if last_running_scene:
-                            log(f"  → restart_scene: [{last_running_scene}] を最初からやり直し")
-                            run_scene(last_running_scene, "restart_scene")
+                            pol = scene_policies.get(last_running_scene, {})
+                            policy = pol.get("policy", "always")
+                            if policy == "once":
+                                log(f"  → restart_scene: [{last_running_scene}] は1回限り設定のため復帰スキップ")
+                            elif policy == "window":
+                                started = pol.get("started_at") or datetime.now()
+                                wmin = int(pol.get("window_min", 0))
+                                elapsed_min = (datetime.now() - started).total_seconds() / 60.0
+                                if elapsed_min > wmin:
+                                    log(
+                                        f"  → restart_scene: [{last_running_scene}] は枠超過 "
+                                        f"({elapsed_min:.1f}/{wmin}分) のため復帰スキップ"
+                                    )
+                                else:
+                                    log(
+                                        f"  → restart_scene: [{last_running_scene}] を最初からやり直し "
+                                        f"(枠内 {elapsed_min:.1f}/{wmin}分)"
+                                    )
+                                    run_scene(last_running_scene, "restart_scene")
+                            else:
+                                log(f"  → restart_scene: [{last_running_scene}] を最初からやり直し")
+                                run_scene(last_running_scene, "restart_scene")
                         else:
                             # まだシーンが実行されていない — 直近スケジュールに戻る
-                            fallback = _last_due_scenes(flow, datetime.now())
-                            if fallback:
+                            fb = _last_due_scenes(flow, datetime.now())
+                            if fb:
+                                fb_entry, fallback = fb
                                 names = ", ".join(fallback)
                                 log(f"  → restart_scene: 未実行のため直近スケジュール [{names}] を実行")
+                                fb_started = _entry_started_at(fb_entry, datetime.now())
                                 for fi, fpath in enumerate(fallback):
                                     if should_stop():
                                         break
+                                    scene_policies[fpath] = {
+                                        "policy": fb_entry.retry_policy,
+                                        "window_min": fb_entry.retry_window_min,
+                                        "started_at": fb_started,
+                                    }
                                     last_running_scene = fpath
                                     run_scene(fpath, f"restart_scene 直近スケジュール [{fi + 1}/{len(fallback)}]")
                             else:
                                 log("  → restart_scene: 直前のシーンが不明のためスキップ")
                     elif w.after == "next_scene":
                         current_idx += 1
+                    elif w.after == "noop":
+                        log("  → noop: 何もせず待機に戻る")
                     # main_sequence の restart_scene: current_idx そのまま
                 continue
 
@@ -553,13 +612,18 @@ def replay_flow(
                 last_fired_schedule[idx] = datetime.now().date()
                 scenes = entry.sequence or ([entry.target] if entry.target else [])
                 log(f"📅 スケジュール発火: {entry.time} → {scenes}")
-                pending.append(_ScheduleEvent(scenes=scenes))
+                pending.append(_ScheduleEvent(
+                    scenes=scenes,
+                    retry_policy=entry.retry_policy,
+                    retry_window_min=entry.retry_window_min,
+                    started_at=_entry_started_at(entry, datetime.now()),
+                ))
                 continue
 
             # 3. ウォッチャー直接評価（シーン開始前）
             w = watcher_state.pop_fired()
             if w is not None:
-                log(f"👁 watcher 発火: {w.id} → {w.handler}")
+                log(f"👁 watcher 発火: [{w.title or w.id}] → {w.handler}")
                 if w.alert_desktop and notify_fn:
                     notify_fn(f"ウォッチャー発火: {w.title}", w.handler or "")
                 pending.append(_WatcherEvent(watcher=w))

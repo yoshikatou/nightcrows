@@ -23,6 +23,9 @@ class ScheduleEntry:
     days: list[int] = field(default_factory=list)  # 0=月〜6=日  repeat="weekly" のとき使用
     date: str = ""                   # "YYYY-MM-DD"  repeat="once" のとき使用
     enabled: bool = True             # False にするとスケジュール発火をスキップ
+    # ウォッチャーの restart_scene 復帰可否（時間枠制限）
+    retry_policy: str = "always"     # "always" = 常に再実行可 / "once" = 1回限り / "window" = 起動から retry_window_min 内のみ
+    retry_window_min: int = 0        # retry_policy="window" のとき有効（分）
 
 
 # -------------------------------------------------------------- watcher types
@@ -164,6 +167,10 @@ def _schedule_to_dict(s: ScheduleEntry) -> dict[str, Any]:
         d["date"] = s.date
     if not s.enabled:
         d["enabled"] = False
+    if s.retry_policy and s.retry_policy != "always":
+        d["retry_policy"] = s.retry_policy
+        if s.retry_policy == "window":
+            d["retry_window_min"] = int(s.retry_window_min)
     return d
 
 
@@ -176,6 +183,8 @@ def _schedule_from_dict(d: dict[str, Any]) -> ScheduleEntry:
         days=list(d.get("days", []) or []),
         date=d.get("date", ""),
         enabled=bool(d.get("enabled", True)),
+        retry_policy=str(d.get("retry_policy", "always")),
+        retry_window_min=int(d.get("retry_window_min", 0)),
     )
 
 

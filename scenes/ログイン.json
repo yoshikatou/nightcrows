@@ -1,0 +1,57 @@
+{
+  "name": "ログイン",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 1,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260426_075426_120028.png"
+    },
+    {
+      "type": "tap",
+      "x": 2203,
+      "y": 987,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260426_075444_803267.png"
+    },
+    {
+      "type": "tap",
+      "x": 2173,
+      "y": 870,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 5.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260426_075506_386646.png"
+    },
+    {
+      "type": "tap",
+      "x": 2405,
+      "y": 1151,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 60.0
+    }
+  ]
+}
