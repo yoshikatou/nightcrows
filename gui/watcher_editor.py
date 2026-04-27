@@ -173,6 +173,13 @@ class _WatcherWizard(QDialog):
         lbl = QLabel("選択範囲がこの画像と一致したときに発火します")
         lbl.setStyleSheet("color:#555; font-size:9px;"); lbl.setWordWrap(True)
         f_appear.addRow("", lbl)
+        btn_match_appear = QPushButton("▶ マッチテスト（手動実行）")
+        btn_match_appear.clicked.connect(self._run_match_test)
+        f_appear.addRow("", btn_match_appear)
+        self._match_result_appear = QLabel("← スクショを撮ってからテスト可")
+        self._match_result_appear.setStyleSheet("color:#555; font-size:9px;")
+        self._match_result_appear.setWordWrap(True)
+        f_appear.addRow("マッチ結果:", self._match_result_appear)
         self._cond_stack.addWidget(p_appear)
 
         p_gone = QWidget()
@@ -187,6 +194,13 @@ class _WatcherWizard(QDialog):
         lbl2 = QLabel("選択範囲の画像がN回連続して検出されなくなったときに発火します")
         lbl2.setStyleSheet("color:#555; font-size:9px;"); lbl2.setWordWrap(True)
         f_gone.addRow("", lbl2)
+        btn_match_gone = QPushButton("▶ マッチテスト（手動実行）")
+        btn_match_gone.clicked.connect(self._run_match_test)
+        f_gone.addRow("", btn_match_gone)
+        self._match_result_gone = QLabel("← スクショを撮ってからテスト可")
+        self._match_result_gone.setStyleSheet("color:#555; font-size:9px;")
+        self._match_result_gone.setWordWrap(True)
+        f_gone.addRow("マッチ結果:", self._match_result_gone)
         self._cond_stack.addWidget(p_gone)
 
         p_ocr = QWidget()
@@ -310,6 +324,7 @@ class _WatcherWizard(QDialog):
                 QTimer.singleShot(50, lambda: (
                     self._canvas.highlight_region(*region),
                     self._run_ocr_test(),
+                    self._run_match_test(),
                 ))
         except Exception as e:
             import traceback
@@ -345,9 +360,12 @@ class _WatcherWizard(QDialog):
         pix = _np_to_pixmap(crop, 600, 64)
         self._crop_label.setPixmap(pix)
         self._crop_label.setText("")
-        # OCR タイプなら即座にテスト実行
-        if self._type_group.checkedId() == 2:
+        # 種別に応じてテスト自動実行
+        ctype_idx = self._type_group.checkedId()
+        if ctype_idx == 2:
             self._run_ocr_test()
+        elif ctype_idx in (0, 1):
+            self._run_match_test()
 
     def _on_type_changed(self, idx: int) -> None:
         self._cond_stack.setCurrentIndex(idx)
@@ -393,6 +411,39 @@ class _WatcherWizard(QDialog):
                 self._ocr_result_lbl.setStyleSheet("font-weight:bold; color:#c62828;")
         except Exception as e:
             self._ocr_result_lbl.setText(f"エラー: {e}")
+
+    # =========================================================== 画像マッチテスト
+    def _run_match_test(self) -> None:
+        ctype_idx = self._type_group.checkedId()
+        if ctype_idx not in (0, 1):
+            return
+        lbl = self._match_result_appear if ctype_idx == 0 else self._match_result_gone
+        threshold = self.threshold_appear.value() if ctype_idx == 0 else self.threshold_gone.value()
+
+        if self._img is None or self._crop is None or not self._region:
+            lbl.setText("← スクショを撮ってからテスト可")
+            lbl.setStyleSheet("color:#555; font-size:9px;")
+            return
+        x, y, w, h = self._region
+        ih, iw = self._img.shape[:2]
+        target = self._img[max(0, y):min(y + h, ih), max(0, x):min(x + w, iw)]
+        tmpl = self._crop
+        if target.size == 0 or target.shape[0] < tmpl.shape[0] or target.shape[1] < tmpl.shape[1]:
+            lbl.setText("エラー: region がテンプレより小さいか範囲外")
+            lbl.setStyleSheet("color:#c62828; font-size:9px;")
+            return
+        res = cv2.matchTemplate(target, tmpl, cv2.TM_CCOEFF_NORMED)
+        _, maxv, _, _ = cv2.minMaxLoc(res)
+        hit = maxv >= threshold
+        margin = maxv - threshold
+        sign = "+" if margin >= 0 else ""
+        status = "✅ 発火" if hit else "❌ 不発火"
+        lbl.setText(f"{status}  スコア: {maxv:.3f}  マージン: {sign}{margin:.3f}")
+        lbl.setStyleSheet(
+            "font-weight:bold; color:#1b5e20; font-size:13px;"
+            if hit else
+            "font-weight:bold; color:#c62828; font-size:13px;"
+        )
 
     # =========================================================== アクション
     def _browse_handler(self) -> None:
