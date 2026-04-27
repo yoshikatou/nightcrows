@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-04-27
+
+### 設定: `last_flow` を相対パスで保存し PC 間ポータブルに（`gui/settings.py`）
+
+**背景:** 2台の PC でリポジトリを共有しているが `settings.json` の `last_flow` が絶対パス（例: `D:/github2/nightcrows/flows/基本.json`）で保存されるため、もう一方の PC では起動時に前回のフローが復元されなかった。
+
+**修正:**
+
+- `_to_relative_path(p)`: 絶対パスをプロジェクト相対パス（例: `flows/基本.json`）に変換。異なるドライブへの参照は絶対パスのままフォールバック。
+- `_to_absolute_path(p)`: 読み込み時に相対パスを `os.path.abspath` で絶対パスに展開。
+- `save_settings` で `last_flow` を相対パスに変換してから書き出し。
+- `load_settings` で読み込んだ値を絶対パスに展開して `AppSettings` に格納。
+
+既存コード（`os.path.exists` 等）への影響なし。
+
+---
+
+### ウォッチャー編集：画像マッチテストボタン追加（`gui/watcher_editor.py`）
+
+**背景:** OCR 条件には「▶ OCRテスト」ボタンがあるが、`image_appear` / `image_gone` 条件にはスコア確認手段がなく、閾値の妥当性を検証できなかった。
+
+**追加内容:**
+
+- `image_appear` / `image_gone` パネルそれぞれに「**▶ マッチテスト（手動実行）**」ボタンとマッチ結果ラベルを追加。
+- `_run_match_test()` メソッド: `cv2.matchTemplate` でスコアを計算し、閾値との比較結果を `✅ 発火 / ❌ 不発火  スコア: X.XXX  マージン: ±X.XXX` 形式で表示。
+- **自動実行:** スクショ取得後・領域ドラッグ選択後に自動でテストを実行。
+
+**使い方:** 1. スクショ取得 → 2. マッチ結果ラベルで即時確認 → 3. 必要に応じて閾値を調整して再テスト。
+
+---
+
+### バグ修正: スケジュール `target` と `sequence` の混在問題（`gui/flow.py`, `flows/基本.json`）
+
+**問題:** `ScheduleEntry` の `sequence` に追加でシーンを登録すると、実行時コード `scenes = entry.sequence or ([entry.target] if entry.target else [])` が `sequence` を優先するため、旧形式の `target` フィールドに残っていたシーンが完全に無視されていた。
+
+**再現ケース:** 月曜 13:08 のスケジュール — `target=近隣の街でポーション補給.json`、`sequence=[スケジューラー起動.json]` という状態で、ポーション補給が実行されずスケジューラー起動だけが動いた。
+
+**修正:**
+
+- `gui/flow.py` `_schedule_from_dict`: 読み込み時に `sequence` が非空かつ `target` が未含有の場合のみ `target` を先頭挿入（自動マイグレーション）。
+  - `sequence` が空の場合は既存の `or` フォールバックに任せ、挿入しない（二重表示防止）。
+- `flows/基本.json`: 月・日曜 13:08 エントリの `sequence` を `["近隣の街でポーション補給.json", "スケジューラー起動.json"]` に修正。
+
+---
+
+### 実行ログにシーン名を表示（`gui/flow_runner.py`）
+
+**変更前:** `▶ スケジュール [1/1]: スケジューラー起動.json`
+**変更後:** `▶ スケジュール [1/1]: スケジューラー起動  (スケジューラー起動.json)`
+
+`run_scene` でシーン読み込み後に `scene.name`（JSON 内の `name` フィールド）をファイル名の前に表示するよう変更。読み込み失敗時はファイルパスのみ表示。
+
+---
+
+### バグ修正: `scenes/` プレフィックスの二重付与（`gui/flow_runner.py`）
+
+**問題:** ウォッチャーの `handler` フィールドに `"scenes/watcher_appear.json"` のように `scenes/` 付きで保存されているとき、`_scene_path` が `os.path.join("scenes", "scenes/watcher_appear.json")` = `"scenes\\scenes/watcher_appear.json"` を生成してファイルが見つからなかった。
+
+**修正:** `_scene_path(rel)` で `rel` が `scenes/` または `scenes\` で始まる場合にプレフィックスを除去してから `os.path.join` を適用。どちらの形式で保存されていても正しく動作する。
+
+---
+
 ## 2026-04-25
 
 ### フロー編集：セル複製・スキップ機能追加
