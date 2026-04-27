@@ -10,6 +10,14 @@
       "target": "激戦地2 80LV.json",
       "repeat": "weekly",
       "days": [
+        0
+      ]
+    },
+    {
+      "time": "00:30",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
         6
       ]
     },
@@ -34,6 +42,16 @@
       "target": "BR.json",
       "repeat": "weekly",
       "days": [
+        0
+      ],
+      "retry_policy": "window",
+      "retry_window_min": 5
+    },
+    {
+      "time": "12:52",
+      "target": "BR.json",
+      "repeat": "weekly",
+      "days": [
         4
       ],
       "retry_policy": "window",
@@ -58,6 +76,18 @@
       ],
       "retry_policy": "window",
       "retry_window_min": 5
+    },
+    {
+      "time": "13:08",
+      "target": "近隣の街でポーション補給.json",
+      "repeat": "weekly",
+      "sequence": [
+        "近隣の街でポーション補給.json",
+        "スケジューラー起動.json"
+      ],
+      "days": [
+        0
+      ]
     },
     {
       "time": "13:08",
@@ -80,10 +110,19 @@
       "target": "近隣の街でポーション補給.json",
       "repeat": "weekly",
       "sequence": [
+        "近隣の街でポーション補給.json",
         "スケジューラー起動.json"
       ],
       "days": [
         6
+      ]
+    },
+    {
+      "time": "15:00",
+      "target": "激戦地2 80LV.json",
+      "repeat": "weekly",
+      "days": [
+        0
       ]
     },
     {

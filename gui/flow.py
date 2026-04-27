@@ -175,10 +175,15 @@ def _schedule_to_dict(s: ScheduleEntry) -> dict[str, Any]:
 
 
 def _schedule_from_dict(d: dict[str, Any]) -> ScheduleEntry:
+    target = d.get("target", "")
+    sequence = list(d.get("sequence", []) or [])
+    # target が sequence に含まれていない場合は先頭に挿入（旧形式 → 新形式 自動移行）
+    if target and target not in sequence:
+        sequence = [target] + sequence
     return ScheduleEntry(
         time=d.get("time", "00:00"),
-        target=d.get("target", ""),
-        sequence=list(d.get("sequence", []) or []),
+        target=target,
+        sequence=sequence,
         repeat=d.get("repeat", "daily"),
         days=list(d.get("days", []) or []),
         date=d.get("date", ""),
