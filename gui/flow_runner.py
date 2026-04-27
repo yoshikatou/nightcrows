@@ -52,6 +52,21 @@ def _scene_path(rel: str) -> str:
     return os.path.join(SCENES_DIR, rel)
 
 
+def _entry_scenes(entry: "ScheduleEntry") -> list[str]:
+    """ScheduleEntry の実行シーンリストを返す。
+
+    target と sequence が混在するケース（旧形式データ）を吸収する:
+    - sequence が空 → [target]
+    - sequence が非空で target が含まれていない → [target] + sequence
+    - sequence が非空で target が含まれている   → sequence そのまま
+    """
+    if not entry.sequence:
+        return [entry.target] if entry.target else []
+    if entry.target and entry.target not in entry.sequence:
+        return [entry.target] + list(entry.sequence)
+    return list(entry.sequence)
+
+
 # ============================================================ schedule
 def _check_schedule(
     flow: Flow, now: datetime, last_fired: dict[int, date]
@@ -380,7 +395,7 @@ def _last_due_scenes(flow: Flow, now: datetime) -> tuple[ScheduleEntry, list[str
             continue
         if entry.repeat == "weekly" and entry.days and today_wd not in entry.days:
             continue
-        scenes = entry.sequence or ([entry.target] if entry.target else [])
+        scenes = _entry_scenes(entry)
         if scenes:
             candidates.append((entry.time, entry, list(scenes)))
 
@@ -485,7 +500,7 @@ def replay_flow(
         if fired is not None:
             idx, entry = fired
             last_fired_schedule[idx] = datetime.now().date()
-            scenes = entry.sequence or ([entry.target] if entry.target else [])
+            scenes = _entry_scenes(entry)
             pending.append(_ScheduleEvent(
                 scenes=scenes,
                 retry_policy=entry.retry_policy,
@@ -618,7 +633,7 @@ def replay_flow(
             if fired is not None:
                 idx, entry = fired
                 last_fired_schedule[idx] = datetime.now().date()
-                scenes = entry.sequence or ([entry.target] if entry.target else [])
+                scenes = _entry_scenes(entry)
                 log(f"📅 スケジュール発火: {entry.time} → {scenes}")
                 pending.append(_ScheduleEvent(
                     scenes=scenes,
