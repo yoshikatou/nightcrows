@@ -62,6 +62,23 @@ def _parse_device(d: dict) -> Device | None:
     return Device(label=label, ip=ip)
 
 
+def _to_relative_path(p: str) -> str:
+    """絶対パスをプロジェクト相対パスに変換（異なるドライブなら絶対パスのまま）。"""
+    if not p or not os.path.isabs(p):
+        return p
+    try:
+        return os.path.relpath(p).replace("\\", "/")
+    except ValueError:
+        return p.replace("\\", "/")
+
+
+def _to_absolute_path(p: str) -> str:
+    """相対パスを絶対パスに展開（既に絶対パスなら変換しない）。"""
+    if not p or os.path.isabs(p):
+        return p
+    return os.path.abspath(p)
+
+
 def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
     if not os.path.exists(path):
         s = _default_settings()
@@ -89,7 +106,7 @@ def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
         devices=devices,
         tesseract_cmd=data.get("tesseract_cmd", ""),
         last_device=data.get("last_device", ""),
-        last_flow=data.get("last_flow", ""),
+        last_flow=_to_absolute_path(data.get("last_flow", "")),
         recording=recording,
     )
 
@@ -100,7 +117,7 @@ def save_settings(s: AppSettings, path: str = SETTINGS_PATH) -> None:
         "devices": [{"label": d.label, "ip": d.ip} for d in s.devices],
         "tesseract_cmd": s.tesseract_cmd,
         "last_device": s.last_device,
-        "last_flow": s.last_flow,
+        "last_flow": _to_relative_path(s.last_flow),
         "recording": {
             "out_dir": r.out_dir,
             "interval_min": r.interval_min,
