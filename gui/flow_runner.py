@@ -41,7 +41,14 @@ StopFn = Callable[[], bool]
 
 
 def _scene_path(rel: str) -> str:
-    """scenes/ からの相対パスを実際のパスに。"""
+    """scenes/ からの相対パスを実際のパスに。
+    handler に "scenes/" プレフィックスが含まれていても二重にならないよう吸収する。
+    """
+    for sep in ("/", "\\"):
+        prefix = SCENES_DIR + sep
+        if rel.startswith(prefix):
+            rel = rel[len(prefix):]
+            break
     return os.path.join(SCENES_DIR, rel)
 
 
