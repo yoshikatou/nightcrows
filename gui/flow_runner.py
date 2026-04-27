@@ -501,12 +501,13 @@ def replay_flow(
     seq_state: dict[str, int] = {}
 
     def run_scene(path: str, label: str) -> None:
-        log(f"▶ {label}: {path}")
         try:
             scene = load_scene(_scene_path(path))
         except Exception as e:
+            log(f"▶ {label}: {path}")
             log(f"  シーン読込失敗: {path}: {e}")
             return
+        log(f"▶ {label}: {scene.name}  ({path})")
         replay_scene(scene, serial, log=log, should_stop=scene_interrupt,
                      _seq_state=seq_state)
 
