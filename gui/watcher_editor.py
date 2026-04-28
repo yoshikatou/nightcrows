@@ -263,6 +263,24 @@ class _WatcherWizard(QDialog):
         self.priority_spin = QSpinBox()
         self.priority_spin.setRange(0, 999)
         act_lay.addRow("優先度 (大きいほど優先):", self.priority_spin)
+        poll_row = QHBoxLayout()
+        self.poll_min_spin = QDoubleSpinBox()
+        self.poll_min_spin.setRange(0.0, 3600.0); self.poll_min_spin.setSingleStep(0.5)
+        self.poll_min_spin.setDecimals(1); self.poll_min_spin.setSuffix(" 秒")
+        self.poll_min_spin.setSpecialValueText("全体設定")
+        self.poll_max_spin = QDoubleSpinBox()
+        self.poll_max_spin.setRange(0.0, 3600.0); self.poll_max_spin.setSingleStep(0.5)
+        self.poll_max_spin.setDecimals(1); self.poll_max_spin.setSuffix(" 秒")
+        self.poll_max_spin.setSpecialValueText("固定")
+        poll_row.addWidget(QLabel("最小:"))
+        poll_row.addWidget(self.poll_min_spin)
+        poll_row.addWidget(QLabel("〜  最大:"))
+        poll_row.addWidget(self.poll_max_spin)
+        poll_row.addStretch()
+        act_lay.addRow("ポーリング間隔:", poll_row)
+        lbl_poll = QLabel("0=全体設定を使用。最大>最小のときランダム間隔")
+        lbl_poll.setStyleSheet("color:#555; font-size:9px;")
+        act_lay.addRow("", lbl_poll)
         self.enabled_check = QCheckBox("有効")
         self.enabled_check.setChecked(True)
         act_lay.addRow("", self.enabled_check)
@@ -492,6 +510,8 @@ class _WatcherWizard(QDialog):
                              consecutive=self.ocr_consecutive.value())
 
         wid = (self._edit_watcher.id if self._edit_watcher else str(uuid.uuid4())[:8])
+        poll_min = self.poll_min_spin.value()
+        poll_max = self.poll_max_spin.value() if self.poll_max_spin.value() > poll_min else 0.0
         self._result = Watcher(
             id=wid,
             title=self.title_edit.text().strip(),
@@ -503,6 +523,8 @@ class _WatcherWizard(QDialog):
             cooldown_s=self.cooldown_spin.value(),
             interrupt="step_end",
             alert_desktop=self.alert_check.isChecked(),
+            poll_min_s=poll_min,
+            poll_max_s=poll_max,
         )
         self.accept()
 
@@ -516,6 +538,8 @@ class _WatcherWizard(QDialog):
         if idx >= 0:
             self.after_combo.setCurrentIndex(idx)
         self.cooldown_spin.setValue(w.cooldown_s)
+        self.poll_min_spin.setValue(w.poll_min_s)
+        self.poll_max_spin.setValue(w.poll_max_s)
 
         ctype = w.condition.type
         if ctype == "image_appear":

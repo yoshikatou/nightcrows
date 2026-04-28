@@ -57,6 +57,8 @@ class Watcher:
     cooldown_s: float = 0.0
     interrupt: str = "step_end"      # "step_end" | "immediate"
     alert_desktop: bool = False      # 発火時にデスクトップ通知を表示する
+    poll_min_s: float = 0.0          # 個別ポーリング間隔・最小秒数 (0=全体設定を使う)
+    poll_max_s: float = 0.0          # 個別ポーリング間隔・最大秒数 (0=min と同じ=固定)
 
 
 # ----------------------------------------------------------------------- flow
@@ -124,7 +126,7 @@ def _cond_from_dict(d: dict[str, Any]) -> Condition:
 
 
 def _watcher_to_dict(w: Watcher) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "id": w.id,
         "title": w.title,
         "enabled": w.enabled,
@@ -136,6 +138,11 @@ def _watcher_to_dict(w: Watcher) -> dict[str, Any]:
         "interrupt": w.interrupt,
         "alert_desktop": w.alert_desktop,
     }
+    if w.poll_min_s > 0:
+        d["poll_min_s"] = w.poll_min_s
+        if w.poll_max_s > w.poll_min_s:
+            d["poll_max_s"] = w.poll_max_s
+    return d
 
 
 def _watcher_from_dict(d: dict[str, Any]) -> Watcher:
@@ -150,6 +157,8 @@ def _watcher_from_dict(d: dict[str, Any]) -> Watcher:
         cooldown_s=float(d.get("cooldown_s", 0.0)),
         interrupt=d.get("interrupt", "step_end"),
         alert_desktop=bool(d.get("alert_desktop", False)),
+        poll_min_s=float(d.get("poll_min_s", 0.0)),
+        poll_max_s=float(d.get("poll_max_s", 0.0)),
     )
 
 

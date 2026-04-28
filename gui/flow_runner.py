@@ -331,32 +331,64 @@ class WatcherState:
         self._hit_count[watcher_id]  = 0
 
     # ------------------------------------------------------------------ impl
+    def _next_interval(self, w: "Watcher") -> float:
+        """ウォッチャーの次回ポーリング間隔を返す。個別設定がなければ全体設定を使う。"""
+        lo = w.poll_min_s if w.poll_min_s > 0 else self._poll_s
+        hi = w.poll_max_s if w.poll_max_s > w.poll_min_s else lo
+        if hi <= lo:
+            return lo
+        import random as _r
+        return _r.uniform(lo, hi)
+
     def _run(self) -> None:
+        # ウォッチャーごとの次回評価時刻（未設定=即時評価）
+        next_eval: dict[str, float] = {}
+
         while not self._stop.is_set():
             if self._paused.is_set():
                 time.sleep(0.1)
                 continue
+
+            now = time.monotonic()
+            due = [w for w in self._enabled if now >= next_eval.get(w.id, 0.0)]
+
+            if not due:
+                # 次に評価が必要なウォッチャーまで待つ（最大 0.1 秒）
+                if self._enabled:
+                    nxt = min(next_eval.get(w.id, now) for w in self._enabled)
+                    sleep_s = max(0.0, nxt - now)
+                else:
+                    sleep_s = self._poll_s
+                time.sleep(min(sleep_s, 0.1))
+                continue
+
             try:
                 png = screencap(self._serial)
                 arr = np.frombuffer(png, dtype=np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             except Exception as e:
                 self._log(f"  watcher screencap エラー: {e}")
-                time.sleep(self._poll_s)
+                snap = time.monotonic()
+                for w in due:
+                    next_eval[w.id] = snap + self._next_interval(w)
                 continue
             if img is None:
-                time.sleep(self._poll_s)
+                snap = time.monotonic()
+                for w in due:
+                    next_eval[w.id] = snap + self._next_interval(w)
                 continue
 
-            now = time.monotonic()
+            snap = time.monotonic()
             fires: list[Watcher] = []
-            for w in self._enabled:
+            for w in due:
+                # 次回評価時刻を即座に設定（評価時間を除いた間隔）
+                next_eval[w.id] = snap + self._next_interval(w)
+
                 if self._paused.is_set():
                     break
                 last = self._last_fired_mono.get(w.id, 0.0)
-                if last + w.cooldown_s > now:
+                if last + w.cooldown_s > snap:
                     continue
-                # 既にキューにあるものは二重検出しない
                 if any(q.id == w.id for q in self._fired_queue):
                     continue
                 wname = w.title or w.id
@@ -367,16 +399,14 @@ class WatcherState:
                     continue
 
                 if w.condition.type == "image_gone":
-                    # 連続 N 回外した場合だけ発火。マッチ時はカウンタリセット
                     required = max(1, int(w.condition.consecutive or 1))
-                    if single:  # この瞬間「外れている」
+                    if single:
                         self._miss_count[w.id] = self._miss_count.get(w.id, 0) + 1
                         if self._miss_count[w.id] >= required:
                             fires.append(w)
                     else:
                         self._miss_count[w.id] = 0
                 elif w.condition.type in ("ocr_number", "digit_threshold"):
-                    # 連続 N 回ヒットした場合だけ発火。外れたらカウンタリセット
                     required = max(1, int(w.condition.consecutive or 1))
                     val = _read_ocr_value(w.condition, img)
                     val_str = f" 読取値={val}" if val is not None else ""
@@ -396,17 +426,13 @@ class WatcherState:
                         fires.append(w)
 
             if fires:
-                # priority 高 → 配列順 で1つに絞る
                 fires.sort(key=lambda w: (-w.priority, self._enabled.index(w)))
                 winner = fires[0]
-                # 検知時にも last_fired を更新（暫定、handler 終了時に再更新される）
                 self._last_fired_mono[winner.id] = time.monotonic()
                 self._fired_queue.append(winner)
                 wname = winner.title or winner.id
                 self._log(f"  👁 watcher 発火検知: [{wname}] "
                           f"(priority={winner.priority})")
-
-            time.sleep(self._poll_s)
 
 
 # ============================================================ ヘルパー
