@@ -237,6 +237,38 @@ def _ocr_number(c: Condition, img: np.ndarray) -> bool:
         return False
 
 
+def _read_ocr_value(c: Condition, img: np.ndarray) -> int | None:
+    """ocr_number / digit_threshold の読み取り値だけを返す（比較なし）。ログ用。"""
+    if c.type == "digit_threshold":
+        return _read_digits(c, img)
+    if c.type == "ocr_number":
+        try:
+            import pytesseract
+        except ImportError:
+            return None
+        if not c.region or len(c.region) != 4:
+            return None
+        x, y, w, h = c.region
+        h_img, w_img = img.shape[:2]
+        crop = img[max(0, y):min(y + h, h_img), max(0, x):min(x + w, w_img)]
+        if crop.size == 0:
+            return None
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        config = "--psm 7 --oem 3"
+        wl = (c.ocr_whitelist or "").strip()
+        if wl:
+            config += f" -c tessedit_char_whitelist={wl}"
+        try:
+            text = pytesseract.image_to_string(gray, config=config).strip()
+            digits = "".join(ch for ch in text if ch.isdigit())
+            return int(digits) if digits else None
+        except Exception:
+            return None
+    return None
+
+
 def _compare(a: int, op: str, b: int) -> bool:
     if op == "<":
         return a < b
@@ -346,15 +378,18 @@ class WatcherState:
                 elif w.condition.type in ("ocr_number", "digit_threshold"):
                     # 連続 N 回ヒットした場合だけ発火。外れたらカウンタリセット
                     required = max(1, int(w.condition.consecutive or 1))
+                    val = _read_ocr_value(w.condition, img)
+                    val_str = f" 読取値={val}" if val is not None else ""
+                    cond_str = f" ({w.condition.op}{w.condition.value})"
                     if single:
                         self._hit_count[w.id] = self._hit_count.get(w.id, 0) + 1
                         cnt = self._hit_count[w.id]
-                        self._log(f"  👁 [{wname}] 連続ヒット {cnt}/{required}")
+                        self._log(f"  👁 [{wname}] 連続ヒット {cnt}/{required}{val_str}{cond_str}")
                         if cnt >= required:
                             fires.append(w)
                     else:
                         if self._hit_count.get(w.id, 0) > 0:
-                            self._log(f"  👁 [{wname}] 条件外れ — カウンタリセット")
+                            self._log(f"  👁 [{wname}] 条件外れ — カウンタリセット{val_str}{cond_str}")
                         self._hit_count[w.id] = 0
                 else:
                     if single:
