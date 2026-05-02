@@ -1,6 +1,7 @@
 """ランナータブ — 実行ログの表示専用。再生/停止はメインウィンドウ上部のボタンで行う。"""
 from __future__ import annotations
 
+import os
 import threading
 from datetime import datetime
 
@@ -15,6 +16,7 @@ from .maintenance import load_maintenance
 from .notify import show_desktop_alert
 
 FLOWS_DIR = "flows"
+LOG_DIR = "logs"
 
 
 class RunnerWidget(QWidget):
@@ -27,6 +29,8 @@ class RunnerWidget(QWidget):
         self._mw = main_window
         self.flow_thread: threading.Thread | None = None
         self.flow_stop = threading.Event()
+        self._log_fh = None      # 現在書き込み中のファイルハンドル
+        self._log_date = ""      # _log_fh に対応する日付 (YYYY-MM-DD)
 
         self._build_ui()
         self.log_signal.connect(self._append_log)
@@ -160,6 +164,57 @@ class RunnerWidget(QWidget):
 
     def _append_log(self, line: str) -> None:
         self.log_view.appendPlainText(line)
+        self._write_to_file(line)
+
+    _LOG_RETAIN_DAYS = 30   # この日数より古いログファイルを自動削除
+
+    def _write_to_file(self, line: str) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._log_date != today or self._log_fh is None:
+            self._close_log_file()
+            try:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                path = os.path.join(LOG_DIR, f"{today}.log")
+                self._log_fh = open(path, "a", encoding="utf-8")
+                self._log_date = today
+                self._purge_old_logs()
+            except Exception:
+                return
+        try:
+            self._log_fh.write(line + "\n")
+            self._log_fh.flush()
+        except Exception:
+            pass
+
+    def _purge_old_logs(self) -> None:
+        """_LOG_RETAIN_DAYS 日より古い .log ファイルを削除する。"""
+        try:
+            from datetime import timedelta
+            cutoff = datetime.now() - timedelta(days=self._LOG_RETAIN_DAYS)
+            for fname in os.listdir(LOG_DIR):
+                if not fname.endswith(".log"):
+                    continue
+                stem = fname[:-4]   # "YYYY-MM-DD"
+                try:
+                    file_date = datetime.strptime(stem, "%Y-%m-%d")
+                except ValueError:
+                    continue
+                if file_date < cutoff:
+                    try:
+                        os.remove(os.path.join(LOG_DIR, fname))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _close_log_file(self) -> None:
+        if self._log_fh:
+            try:
+                self._log_fh.close()
+            except Exception:
+                pass
+            self._log_fh = None
+            self._log_date = ""
 
     def _on_flow_finished(self) -> None:
         self.status_label.setText("停止中")
@@ -168,3 +223,4 @@ class RunnerWidget(QWidget):
     # ------------------------------------------------------------ shutdown
     def shutdown(self) -> None:
         self.flow_stop.set()
+        self._close_log_file()

@@ -226,6 +226,7 @@ class RecorderWidget(QWidget):
         was_running = self.is_recording()
         if self._recorder is not None:
             self._recorder.stop()
+            self._recorder = None   # 参照を即解放して is_recording() が即 False を返すようにする
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self._set_inputs_enabled(True)

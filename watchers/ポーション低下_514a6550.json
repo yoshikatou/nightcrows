@@ -20,5 +20,7 @@
   "after": "restart_scene",
   "cooldown_s": 30.0,
   "interrupt": "step_end",
-  "alert_desktop": true
+  "alert_desktop": true,
+  "poll_min_s": 1.0,
+  "poll_max_s": 10.0
 }

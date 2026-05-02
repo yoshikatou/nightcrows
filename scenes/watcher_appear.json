@@ -13,17 +13,9 @@
   "steps": [
     {
       "type": "tap",
-      "x": 1375,
-      "y": 761,
+      "x": 1349,
+      "y": 748,
       "duration_ms": 100
-    },
-    {
-      "type": "wait_fixed",
-      "seconds": 3.0
-    },
-    {
-      "type": "call_scene",
-      "scene": "scenes/ログイン.json"
     }
   ]
 }

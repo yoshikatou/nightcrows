@@ -884,6 +884,8 @@ class FlowEditorWidget(QWidget):
                                 timed["retry_window_min"] = int(entry.retry_window_min)
                         result[(row, col)].append(timed)
                     for s in (entry.sequence or []):
+                        if s == entry.target:
+                            continue  # target と重複する seq はスキップ
                         result[(row, col)].append(
                             {"seq": True, "scene": s, "enabled": entry.enabled}
                         )

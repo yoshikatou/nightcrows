@@ -205,36 +205,70 @@ def _read_digits(c: Condition, img: np.ndarray,
         return None
 
 
-def _ocr_number(c: Condition, img: np.ndarray) -> bool:
-    """Tesseract OCR で region 内の数値を読み、op/value と比較。"""
+def _preprocess_for_ocr(crop: np.ndarray) -> list[np.ndarray]:
+    """OCR用前処理バリアントを返す（テストダイアログからも使用）。
+
+    バリアント順:
+      0: Otsu 二値化（既存）
+      1: Otsu 反転 — Otsu が明暗を誤判定したときの救済
+      2: ぼかし後 Otsu — ノイズ・アンチエイリアスを平滑化
+      3: 適応的二値化 — グラデーション背景に強い
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, v0 = cv2.threshold(gray,    0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, v2 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    v3 = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    return [v0, cv2.bitwise_not(v0), v2, v3]
+
+
+_OCR_VARIANT_NAMES = ["Otsu", "Otsu反転", "Otsu+ぼかし", "適応的"]
+
+
+def _ocr_digits_best(crop: np.ndarray, config: str) -> tuple[str | None, int]:
+    """複数の前処理バリアントで OCR を試み、最も長い数字列とバリアント番号を返す。
+
+    Returns:
+        (digits_str, variant_index) — 読み取れなければ (None, -1)
+    """
     try:
         import pytesseract
     except ImportError:
-        return False
+        return None, -1
+    best_digits: str | None = None
+    best_idx = -1
+    for i, v in enumerate(_preprocess_for_ocr(crop)):
+        try:
+            text = pytesseract.image_to_string(v, config=config).strip()
+            digits = "".join(ch for ch in text if ch.isdigit())
+            if digits and (best_digits is None or len(digits) > len(best_digits)):
+                best_digits = digits
+                best_idx = i
+        except Exception:
+            continue
+    return best_digits, best_idx
+
+
+def _ocr_number(c: Condition, img: np.ndarray) -> bool:
+    """Tesseract OCR で region 内の数値を読み、op/value と比較。"""
     if not c.region or len(c.region) != 4:
         return False
     x, y, w, h = c.region
     h_img, w_img = img.shape[:2]
-    x2 = min(x + w, w_img)
-    y2 = min(y + h, h_img)
-    crop = img[max(0, y):y2, max(0, x):x2]
+    crop = img[max(0, y):min(y + h, h_img), max(0, x):min(x + w, w_img)]
     if crop.size == 0:
         return False
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     config = "--psm 7 --oem 3"
     wl = (c.ocr_whitelist or "").strip()
     if wl:
         config += f" -c tessedit_char_whitelist={wl}"
-    try:
-        text = pytesseract.image_to_string(gray, config=config).strip()
-        digits = "".join(ch for ch in text if ch.isdigit())
-        if not digits:
-            return False
-        return _compare(int(digits), c.op, c.value)
-    except Exception:
+    digits, _ = _ocr_digits_best(crop, config)
+    if not digits:
         return False
+    return _compare(int(digits), c.op, c.value)
 
 
 def _read_ocr_value(c: Condition, img: np.ndarray) -> int | None:
@@ -242,10 +276,6 @@ def _read_ocr_value(c: Condition, img: np.ndarray) -> int | None:
     if c.type == "digit_threshold":
         return _read_digits(c, img)
     if c.type == "ocr_number":
-        try:
-            import pytesseract
-        except ImportError:
-            return None
         if not c.region or len(c.region) != 4:
             return None
         x, y, w, h = c.region
@@ -253,19 +283,12 @@ def _read_ocr_value(c: Condition, img: np.ndarray) -> int | None:
         crop = img[max(0, y):min(y + h, h_img), max(0, x):min(x + w, w_img)]
         if crop.size == 0:
             return None
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         config = "--psm 7 --oem 3"
         wl = (c.ocr_whitelist or "").strip()
         if wl:
             config += f" -c tessedit_char_whitelist={wl}"
-        try:
-            text = pytesseract.image_to_string(gray, config=config).strip()
-            digits = "".join(ch for ch in text if ch.isdigit())
-            return int(digits) if digits else None
-        except Exception:
-            return None
+        digits, _ = _ocr_digits_best(crop, config)
+        return int(digits) if digits else None
     return None
 
 
@@ -373,6 +396,14 @@ class WatcherState:
                     next_eval[w.id] = snap + self._next_interval(w)
                 continue
             if img is None:
+                snap = time.monotonic()
+                for w in due:
+                    next_eval[w.id] = snap + self._next_interval(w)
+                continue
+            # 部分破損PNG（デコードできるが画面サイズ未満）は捨てる
+            h_got, w_got = img.shape[:2]
+            if h_got < 200 or w_got < 200:
+                self._log(f"  watcher スクショ異常サイズ {w_got}x{h_got} — スキップ")
                 snap = time.monotonic()
                 for w in due:
                     next_eval[w.id] = snap + self._next_interval(w)

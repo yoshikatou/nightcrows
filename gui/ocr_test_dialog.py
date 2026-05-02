@@ -351,6 +351,13 @@ class OcrTestDialog(QDialog):
         self._crop_label.setStyleSheet("border: 1px solid #aaa; background: #000;")
         self._crop_label.setAlignment(Qt.AlignCenter)
         preview_row.addWidget(self._crop_label, 1)
+        preview_row.addWidget(QLabel("前処理後 (Tesseract入力):"))
+        self._preproc_label = QLabel()
+        self._preproc_label.setMinimumSize(200, 60)
+        self._preproc_label.setMaximumHeight(100)
+        self._preproc_label.setStyleSheet("border: 1px solid #aaa; background: #000;")
+        self._preproc_label.setAlignment(Qt.AlignCenter)
+        preview_row.addWidget(self._preproc_label, 1)
         root.addLayout(preview_row)
 
         # --- ボタン ---
@@ -452,6 +459,23 @@ class OcrTestDialog(QDialog):
                        Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
+    # --------------------------------------------------------- 前処理後プレビュー
+    def _update_preproc_preview(self, gray: np.ndarray) -> None:
+        """グレースケール/二値画像をプレビューラベルに表示する。"""
+        if gray is None:
+            return
+        h, w = gray.shape[:2]
+        if gray.ndim == 2:
+            qimg = QImage(gray.data, w, h, gray.strides[0], QImage.Format_Grayscale8)
+        else:
+            rgb = cv2.cvtColor(gray, cv2.COLOR_BGR2RGB)
+            qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg)
+        self._preproc_label.setPixmap(
+            pix.scaled(self._preproc_label.width(), self._preproc_label.height(),
+                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
     # --------------------------------------------------------- OCR テスト
     def _run_ocr(self) -> None:
         if not _TESS_AVAILABLE:
@@ -480,20 +504,37 @@ class OcrTestDialog(QDialog):
             config += f" -c tessedit_char_whitelist={wl}"
 
         try:
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            # コントラスト強調（ゲームUIの細い数字に効果的）
-            gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            text = pytesseract.image_to_string(gray, config=config).strip()
-            if not text:
-                self._ocr_result_label.setText("読み取り結果: （空）— 範囲や文字種を変えてみてください")
+            from .flow_runner import _preprocess_for_ocr, _OCR_VARIANT_NAMES
+            variants = _preprocess_for_ocr(crop)
+            results: list[tuple[str, str]] = []  # [(digits, variant_name)]
+            best_digits: str | None = None
+            best_img: np.ndarray = variants[0]
+            for i, v in enumerate(variants):
+                text = pytesseract.image_to_string(v, config=config).strip()
+                digits = "".join(ch for ch in text if ch.isdigit())
+                label = _OCR_VARIANT_NAMES[i]
+                results.append((digits or "—", label))
+                if digits and (best_digits is None or len(digits) > len(best_digits)):
+                    best_digits = digits
+                    best_img = v
+
+            self._update_preproc_preview(best_img)
+
+            detail = "  |  ".join(f"{name}: {d}" for d, name in results)
+            if not best_digits:
+                self._ocr_result_label.setText(
+                    f"読み取り結果: （空）— 範囲や文字種を変えてみてください\n{detail}"
+                )
                 self._ocr_result_label.setStyleSheet(
-                    "font-size: 14px; font-weight: bold; color: #c62828; padding: 6px;"
+                    "font-size: 13px; font-weight: bold; color: #c62828; padding: 6px;"
                 )
             else:
-                self._ocr_result_label.setText(f"読み取り結果: {text}")
+                winning_name = next(name for d, name in results if d == best_digits)
+                self._ocr_result_label.setText(
+                    f"読み取り結果: {best_digits}  [{winning_name}]\n{detail}"
+                )
                 self._ocr_result_label.setStyleSheet(
-                    "font-size: 18px; font-weight: bold; color: #1b5e20; padding: 6px;"
+                    "font-size: 16px; font-weight: bold; color: #1b5e20; padding: 6px;"
                 )
         except Exception as e:
             self._ocr_result_label.setText(f"エラー: {e}")
