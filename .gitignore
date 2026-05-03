@@ -4,3 +4,5 @@ __pycache__/
 debug/
 recordings/
 settings.json
+logs/
+refs/

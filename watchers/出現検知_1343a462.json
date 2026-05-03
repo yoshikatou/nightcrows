@@ -1,0 +1,22 @@
+{
+  "id": "1343a462",
+  "title": "ダンジョン利用時間経過ボタン",
+  "enabled": true,
+  "priority": 0,
+  "condition": {
+    "type": "image_appear",
+    "template": "templates/1343a462_image_appear.png",
+    "region": [
+      970,
+      377,
+      771,
+      453
+    ],
+    "threshold": 0.85
+  },
+  "handler": "scenes/watcher_appear.json",
+  "after": "noop",
+  "cooldown_s": 0.0,
+  "interrupt": "step_end",
+  "alert_desktop": false
+}
