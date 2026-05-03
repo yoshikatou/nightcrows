@@ -1,5 +1,5 @@
 {
-  "name": "クエスト処理",
+  "name": "BF3 84LV（移動のみ）",
   "device_ip": "NRBMYDUCIBPJSKA6",
   "rotation": 1,
   "phys_size": [
@@ -13,12 +13,26 @@
   "steps": [
     {
       "type": "snapshot",
-      "path": "templates/snapshots/snap_20260425_131053_905358.png"
+      "path": "templates/snapshots/snap_20260503_154941_918731.png"
     },
     {
       "type": "tap",
-      "x": 2543,
-      "y": 57,
+      "x": 604,
+      "y": 134,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_155018_187142.png"
+    },
+    {
+      "type": "tap",
+      "x": 385,
+      "y": 312,
       "duration_ms": 100
     },
     {
@@ -27,12 +41,28 @@
     },
     {
       "type": "snapshot",
-      "path": "templates/snapshots/snap_20260425_131117_446745.png"
+      "path": "templates/snapshots/snap_20260503_155039_370650.png"
+    },
+    {
+      "type": "swipe",
+      "x1": 1301,
+      "y1": 1049,
+      "x2": 1220,
+      "y2": 899,
+      "duration_ms": 500
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_161014_702152.png"
     },
     {
       "type": "tap",
-      "x": 2122,
-      "y": 358,
+      "x": 1277,
+      "y": 1061,
       "duration_ms": 100
     },
     {
@@ -41,35 +71,17 @@
     },
     {
       "type": "snapshot",
-      "path": "templates/snapshots/snap_20260425_131133_801043.png"
+      "path": "templates/snapshots/snap_20260503_161040_212934.png"
     },
     {
       "type": "tap",
-      "x": 1162,
-      "y": 173,
+      "x": 1311,
+      "y": 940,
       "duration_ms": 100
     },
     {
       "type": "wait_fixed",
       "seconds": 1.0
-    },
-    {
-      "type": "snapshot",
-      "path": "templates/snapshots/snap_20260425_131151_159026.png"
-    },
-    {
-      "type": "tap",
-      "x": 255,
-      "y": 1138,
-      "duration_ms": 100
-    },
-    {
-      "type": "wait_fixed",
-      "seconds": 1.0
-    },
-    {
-      "type": "snapshot",
-      "path": "templates/snapshots/snap_20260425_131207_865029.png"
     },
     {
       "type": "tap",
@@ -79,30 +91,16 @@
     },
     {
       "type": "wait_fixed",
-      "seconds": 1.0
+      "seconds": 45.0
     },
     {
       "type": "snapshot",
-      "path": "templates/snapshots/snap_20260504_053833_870417.png"
+      "path": "templates/snapshots/snap_20260503_161139_437628.png"
     },
     {
       "type": "tap",
-      "x": 2030,
-      "y": 564,
-      "duration_ms": 100
-    },
-    {
-      "type": "wait_fixed",
-      "seconds": 1.0
-    },
-    {
-      "type": "snapshot",
-      "path": "templates/snapshots/snap_20260425_131250_180729.png"
-    },
-    {
-      "type": "tap",
-      "x": 1537,
-      "y": 892,
+      "x": 2541,
+      "y": 774,
       "duration_ms": 100
     },
     {

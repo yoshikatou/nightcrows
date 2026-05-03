@@ -1,0 +1,79 @@
+{
+  "name": "復活",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 1,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "wait_fixed",
+      "seconds": 90.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_173809_735251.png"
+    },
+    {
+      "type": "tap",
+      "x": 2022,
+      "y": 47,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_173822_776863.png"
+    },
+    {
+      "type": "tap",
+      "x": 538,
+      "y": 974,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_173839_332838.png"
+    },
+    {
+      "type": "tap",
+      "x": 150,
+      "y": 379,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_173852_471769.png"
+    },
+    {
+      "type": "tap",
+      "x": 474,
+      "y": 974,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_173905_088462.png"
+    }
+  ]
+}
