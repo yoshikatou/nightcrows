@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
     connect_result_signal = Signal(bool, str, str)   # ok, serial, message
     scrcpy_exited_signal  = Signal(int)              # exit code
     battery_signal        = Signal(int, bool)        # level (-1 = 未取得), charging
+    sync_result_signal    = Signal(bool, str, bool)  # ok, message, is_pull
 
     def __init__(self) -> None:
         super().__init__()
@@ -53,6 +54,7 @@ class MainWindow(QMainWindow):
         self.connect_result_signal.connect(self._on_connect_result)
         self.scrcpy_exited_signal.connect(self._on_scrcpy_exited)
         self.battery_signal.connect(self._on_battery)
+        self.sync_result_signal.connect(self._on_sync_result)
         self.scene_editor.scene_path_changed.connect(self._on_scene_path_changed)
 
         self._clock_timer = QTimer(self)
@@ -92,6 +94,14 @@ class MainWindow(QMainWindow):
         btn_maintenance = QPushButton("🔧 メンテ")
         btn_maintenance.clicked.connect(self._open_maintenance)
         bar.addWidget(btn_maintenance)
+        self.btn_push = QPushButton("↑ PUSH")
+        self.btn_push.setToolTip("scenes/ flows/ watchers/ を git commit して push")
+        self.btn_push.clicked.connect(self._sync_push)
+        bar.addWidget(self.btn_push)
+        self.btn_pull = QPushButton("↓ PULL")
+        self.btn_pull.setToolTip("git pull でリモートの変更を取得してリロード")
+        self.btn_pull.clicked.connect(self._sync_pull)
+        bar.addWidget(self.btn_pull)
         btn_settings = QPushButton("⚙")
         btn_settings.setFixedWidth(36)
         btn_settings.clicked.connect(self._open_settings)
@@ -490,6 +500,87 @@ class MainWindow(QMainWindow):
             self._apply_tesseract_cmd(self.settings.tesseract_cmd)
             self._reload_device_combo()
             self.scene_editor._log("設定を更新")
+
+    # ---------------------------------------------------------------- sync
+    _SYNC_TARGETS = ["scenes/", "flows/", "watchers/"]
+
+    def _sync_push(self) -> None:
+        self.btn_push.setEnabled(False)
+        self.btn_pull.setEnabled(False)
+        self.scene_editor._log("↑ PUSH 開始...")
+
+        def run():
+            try:
+                msgs = []
+                # ステージング
+                subprocess.run(
+                    ["git", "add"] + self._SYNC_TARGETS,
+                    check=True, capture_output=True, text=True,
+                )
+                # 差分確認
+                diff = subprocess.run(
+                    ["git", "diff", "--cached", "--quiet"],
+                    capture_output=True,
+                )
+                if diff.returncode != 0:
+                    # 差分あり → コミット
+                    from datetime import datetime as _dt
+                    msg = _dt.now().strftime("sync %Y-%m-%d %H:%M")
+                    subprocess.run(
+                        ["git", "commit", "-m", msg],
+                        check=True, capture_output=True, text=True,
+                    )
+                    msgs.append(f"コミット: {msg}")
+                else:
+                    msgs.append("コミットなし（変更なし）")
+                # プッシュ
+                r = subprocess.run(
+                    ["git", "push"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(r.stderr.strip() or r.stdout.strip())
+                msgs.append("push 完了")
+                self.sync_result_signal.emit(True, " / ".join(msgs), False)
+            except Exception as e:
+                self.sync_result_signal.emit(False, str(e), False)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _sync_pull(self) -> None:
+        self.btn_push.setEnabled(False)
+        self.btn_pull.setEnabled(False)
+        self.scene_editor._log("↓ PULL 開始...")
+
+        def run():
+            try:
+                r = subprocess.run(
+                    ["git", "pull"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(r.stderr.strip() or r.stdout.strip())
+                out = r.stdout.strip()
+                self.sync_result_signal.emit(True, out or "pull 完了", True)
+            except Exception as e:
+                self.sync_result_signal.emit(False, str(e), True)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_sync_result(self, ok: bool, msg: str, is_pull: bool) -> None:
+        self.btn_push.setEnabled(True)
+        self.btn_pull.setEnabled(True)
+        prefix = "↓ PULL" if is_pull else "↑ PUSH"
+        if ok:
+            self.scene_editor._log(f"  ✓ {prefix}: {msg}")
+            if is_pull:
+                self.watcher_editor._load_from_dir()
+                self.watcher_editor.watchers_changed.emit()
+                self.flow_editor.reload_current_flow()
+                self.flow_editor.refresh_watcher_tags()
+        else:
+            self.scene_editor._log(f"  ✗ {prefix} 失敗: {msg}")
+            QMessageBox.critical(self, f"{prefix} 失敗", msg)
 
     # ------------------------------------------------------------ shutdown
     def closeEvent(self, event):

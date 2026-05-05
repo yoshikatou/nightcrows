@@ -764,6 +764,20 @@ class FlowEditorWidget(QWidget):
             self._mw.settings.last_flow = path
             save_settings(self._mw.settings)
 
+    def reload_current_flow(self) -> None:
+        """PULL 後などにディスクから現在のフローを再読込する。"""
+        if not self._flow_path or not os.path.exists(self._flow_path):
+            return
+        try:
+            flow = load_flow(self._flow_path)
+        except Exception:
+            return
+        self._flow = flow
+        self.name_edit.blockSignals(True)
+        self.name_edit.setText(flow.name)
+        self.name_edit.blockSignals(False)
+        self._populate_grid()
+
     # -------------------------------------------------------------- ファイル操作
     def _open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

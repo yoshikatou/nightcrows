@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-05
+
+### PC 間同期: PUSH / PULL ボタン追加（`gui/main.py`, `gui/flow_editor.py`）
+
+**背景:** シーン・フロー・ウォッチャーをオフィスと自宅の2台の PC で手動同期していた。git コマンドをターミナルから打つ手間を省くため、GUI 上部バーに PUSH / PULL ボタンを追加した。
+
+**実装内容:**
+
+- `gui/main.py`:
+  - 上部バーに「↑ PUSH」「↓ PULL」ボタンを追加（`⚙` 設定ボタンの左）
+  - `sync_result_signal = Signal(bool, str)` を追加
+  - `_sync_push()`: `git add scenes/ flows/ watchers/` → 差分チェック → `git commit` → `git push` をバックグラウンドスレッドで実行
+  - `_sync_pull()`: `git pull` をバックグラウンドスレッドで実行、完了後にウォッチャー・フローをリロード
+  - `_on_sync_result()`: シグナル受信でボタン再有効化 + ログ表示 + PULL 後のリロード
+- `gui/flow_editor.py`:
+  - `reload_current_flow()` を追加: `_flow_path` が設定済みの場合にディスクから再読込してグリッドを再描画
+
+**設計上の判断:**
+- git を同期手段に採用: このプロジェクトはすでに git/GitHub で管理されており、追加インフラ不要
+- 差分なしの場合は `git commit` をスキップして `git push` のみ: 「変更なし」をエラーにしない
+- PULL 後は自動リロード: フロー・ウォッチャーはメモリ上のオブジェクトなのでディスク読み直しが必要
+
+---
+
 ## 2026-05-01〜02
 
 ### バグ調査・修正: 「続けての処理」が実施されない（`flows/基本.json`, `gui/flow_editor.py`）
