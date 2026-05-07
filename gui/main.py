@@ -311,7 +311,21 @@ class MainWindow(QMainWindow):
             )
             self.btn_disconnect.setEnabled(False)
             self.btn_disconnect.setStyleSheet("")
+            self._stop_on_disconnect()
         self._refresh_battery()
+
+    def _stop_on_disconnect(self) -> None:
+        """デバイス切断時にフロー・録画を自動停止する。"""
+        if hasattr(self, "runner") and self.runner.flow_thread and self.runner.flow_thread.is_alive():
+            self.runner.stop()
+            self.scene_editor._log("  デバイス切断 → フロー停止")
+        if hasattr(self, "recorder") and self.recorder.is_recording():
+            self.recorder.stop_recording()
+            self.scene_editor._log("  デバイス切断 → スケジュール録画停止")
+        if self._realtime_recorder is not None and self._realtime_recorder.is_running():
+            self._realtime_recorder.stop()
+            self._update_rec_buttons()
+            self.scene_editor._log("  デバイス切断 → リアル録画停止")
 
     # --------------------------------------------------------- device combo
     def _reload_device_combo(self) -> None:
