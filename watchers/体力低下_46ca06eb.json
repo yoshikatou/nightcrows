@@ -2,7 +2,7 @@
   "id": "46ca06eb",
   "title": "体力低下",
   "enabled": true,
-  "priority": 0,
+  "priority": 500,
   "condition": {
     "type": "ocr_number",
     "region": [
@@ -22,5 +22,5 @@
   "interrupt": "step_end",
   "alert_desktop": true,
   "poll_min_s": 1.0,
-  "poll_max_s": 5.0
+  "poll_max_s": 4.0
 }

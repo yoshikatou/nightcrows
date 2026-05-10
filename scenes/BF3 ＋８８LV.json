@@ -1,0 +1,251 @@
+{
+  "name": "BF3 ＋８８LV",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 0,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "group_header",
+      "label": "BF3"
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_154842_799327.png"
+    },
+    {
+      "type": "tap",
+      "x": 2555,
+      "y": 52,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_154853_286563.png"
+    },
+    {
+      "type": "tap",
+      "x": 2348,
+      "y": 579,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_154918_289019.png"
+    },
+    {
+      "type": "tap",
+      "x": 1860,
+      "y": 952,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 20.0
+    },
+    {
+      "type": "group_header",
+      "label": "移動BF3 88LV"
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095024_186053.png"
+    },
+    {
+      "type": "tap",
+      "x": 596,
+      "y": 141,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "group_header",
+      "label": "ジャンプから88LV"
+    },
+    {
+      "type": "tap",
+      "x": 440,
+      "y": 286,
+      "duration_ms": 100
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_094519_571160.png"
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_094618_259412.png"
+    },
+    {
+      "type": "tap",
+      "x": 2274,
+      "y": 822,
+      "duration_ms": 100
+    },
+    {
+      "type": "swipe",
+      "x1": 2237,
+      "y1": 1094,
+      "x2": 2266,
+      "y2": 659,
+      "duration_ms": 600
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "swipe",
+      "x1": 2259,
+      "y1": 1085,
+      "x2": 2259,
+      "y2": 409,
+      "duration_ms": 500
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_094801_668106.png"
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_094823_572996.png"
+    },
+    {
+      "type": "tap",
+      "x": 2543,
+      "y": 825,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 8.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095215_879796.png"
+    },
+    {
+      "type": "group_header",
+      "label": "基地から徒歩"
+    },
+    {
+      "type": "tap",
+      "x": 2538,
+      "y": 820,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095308_830959.png"
+    },
+    {
+      "type": "tap",
+      "x": 1544,
+      "y": 784,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 3.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095329_837146.png"
+    },
+    {
+      "type": "tap",
+      "x": 435,
+      "y": 322,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095351_416734.png"
+    },
+    {
+      "type": "tap",
+      "x": 1362,
+      "y": 353,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095425_052734.png"
+    },
+    {
+      "type": "tap",
+      "x": 1378,
+      "y": 283,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.0
+    },
+    {
+      "type": "tap",
+      "x": 2538,
+      "y": 40,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 12.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260510_095458_221729.png"
+    },
+    {
+      "type": "tap",
+      "x": 2533,
+      "y": 777,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    }
+  ]
+}
