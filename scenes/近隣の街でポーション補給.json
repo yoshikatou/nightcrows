@@ -65,7 +65,17 @@
     },
     {
       "type": "wait_fixed",
-      "seconds": 3.5
+      "seconds": 6.5
+    },
+    {
+      "type": "tap",
+      "x": 1362,
+      "y": 551,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.0
     },
     {
       "type": "snapshot",
@@ -79,7 +89,7 @@
     },
     {
       "type": "wait_fixed",
-      "seconds": 1.0
+      "seconds": 2.0
     },
     {
       "type": "snapshot",
@@ -93,7 +103,7 @@
     },
     {
       "type": "wait_fixed",
-      "seconds": 1.0
+      "seconds": 1.5
     },
     {
       "type": "tap",
@@ -103,7 +113,7 @@
     },
     {
       "type": "wait_fixed",
-      "seconds": 1.0
+      "seconds": 1.5
     },
     {
       "type": "snapshot",
