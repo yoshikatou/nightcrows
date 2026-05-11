@@ -157,7 +157,7 @@ flow.watchers = global_watchers + flow.watchers
 
 ### 今日の発火回数表示
 
-ウォッチャーが実際にハンドラを実行するたびに `WatcherState.mark_fired()` が呼ばれる。そのタイミングで今日の発火時刻リストを記録し、ウォッチャータブのリストに表示する。
+ウォッチャータブのリストに、今日の発火回数と最終発火時刻を表示する。
 
 ```
 [✓]  体力低下  |  🔢 OCR数値  🔔
@@ -165,23 +165,34 @@ flow.watchers = global_watchers + flow.watchers
       🔥 本日 3回  最終: 14:37
 ```
 
+#### データソース: 日次ログファイル
+
+`logs/YYYY-MM-DD.log` に記録されている `👁 watcher 発火:` 行をパースする。  
+アプリを再起動しても今日分のカウントが保持される。
+
+```
+ログ行フォーマット:
+  [HH:MM:SS] 👁 watcher 発火: [タイトル] → handler.json
+
+パターン: r'^\[(\d{2}:\d{2}):\d{2}\] 👁 watcher 発火: \[(.+?)\]'
+→ { "体力低下": ["11:11", "11:31", "16:39"], ... }
+```
+
 #### データフロー
 
 ```
-WatcherState._fire_log          dict[watcher_id, list["HH:MM"]]
-  ↓ mark_fired() で記録
-  ↓ get_fire_log() で読み出し
-RunnerWidget._watcher_state     replay_flow の on_watcher_state コールバックで保持
-  ↓ get_fire_log() を公開
-WatcherEditorWidget._refresh_list()   30秒タイマー + 手動リロード時に呼び出し
+logs/YYYY-MM-DD.log  （既存のランナーログファイル）
+  ↓ WatcherEditorWidget._parse_today_fire_log() でパース
+  ↓ タイトルをキーに dict[title, list["HH:MM"]] を生成
+WatcherEditorWidget._refresh_list()  30秒タイマー + 手動リロード時に呼び出し
   ↓ _make_item(w, path, fire_times) で表示テキストに反映
 ```
 
 #### 設計上の注意
 
-- `_fire_log` は日付をまたいだとき（`_fire_log_date != today`）に自動クリアされる
-- フロー停止中（`_watcher_state is None`）は空辞書を返すため、リストは発火表示なしで表示される
-- 30秒タイマーは `WatcherEditorWidget.__init__` で起動し、ウィジェットが破棄されるまで動き続ける
+- マッチキーは `w.title`（ログにタイトルが記録されるため）
+- 30秒タイマーは `WatcherEditorWidget.__init__` で起動
+- `flow_runner.py` / `runner_widget.py` への変更は不要（ログファイルが唯一のデータソース）
 
 ### 優先度
 

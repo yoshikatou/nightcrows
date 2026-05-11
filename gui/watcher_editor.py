@@ -8,7 +8,9 @@ watchers.json をフローとは独立して管理する。
 from __future__ import annotations
 
 import os
+import re
 import uuid
+from datetime import datetime as _dt
 
 import cv2
 import numpy as np
@@ -717,15 +719,35 @@ class WatcherEditorWidget(QWidget):
         return list(self._watchers)
 
     # --------------------------------------------------------- リスト
+    @staticmethod
+    def _parse_today_fire_log() -> dict[str, list[str]]:
+        """今日のログファイルからウォッチャータイトル → 発火時刻リストを返す。
+
+        ログ行の形式: [HH:MM:SS] 👁 watcher 発火: [タイトル] → handler
+        """
+        today = _dt.now().strftime("%Y-%m-%d")
+        log_path = os.path.join("logs", f"{today}.log")
+        result: dict[str, list[str]] = {}
+        if not os.path.exists(log_path):
+            return result
+        pattern = re.compile(r'^\[(\d{2}:\d{2}):\d{2}\] 👁 watcher 発火: \[(.+?)\]')
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    m = pattern.match(line)
+                    if m:
+                        hm, title = m.group(1), m.group(2)
+                        result.setdefault(title, []).append(hm)
+        except Exception:
+            pass
+        return result
+
     def _refresh_list(self) -> None:
-        fire_log: dict[str, list[str]] = {}
-        runner = getattr(self._mw, "runner", None)
-        if runner:
-            fire_log = runner.get_fire_log()
+        fire_log = self._parse_today_fire_log()
         row = self.list.currentRow()
         self.list.clear()
         for w, p in zip(self._watchers, self._watcher_paths):
-            self.list.addItem(self._make_item(w, p, fire_log.get(w.id)))
+            self.list.addItem(self._make_item(w, p, fire_log.get(w.title or w.id)))
         if 0 <= row < self.list.count():
             self.list.setCurrentRow(row)
         self._on_selection_changed(self.list.currentRow())
