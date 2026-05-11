@@ -592,6 +592,9 @@ class WatcherEditorWidget(QWidget):
         self._watcher_paths: list[str] = []   # _watchers と 1:1 対応するファイルパス
         self._build_ui()
         self._load_from_dir()
+        self._fire_timer = QTimer(self)
+        self._fire_timer.timeout.connect(self._refresh_list)
+        self._fire_timer.start(30_000)
 
     def _build_ui(self) -> None:
         lay = QVBoxLayout(self)
@@ -715,15 +718,20 @@ class WatcherEditorWidget(QWidget):
 
     # --------------------------------------------------------- リスト
     def _refresh_list(self) -> None:
+        fire_log: dict[str, list[str]] = {}
+        runner = getattr(self._mw, "runner", None)
+        if runner:
+            fire_log = runner.get_fire_log()
         row = self.list.currentRow()
         self.list.clear()
         for w, p in zip(self._watchers, self._watcher_paths):
-            self.list.addItem(self._make_item(w, p))
+            self.list.addItem(self._make_item(w, p, fire_log.get(w.id)))
         if 0 <= row < self.list.count():
             self.list.setCurrentRow(row)
         self._on_selection_changed(self.list.currentRow())
 
-    def _make_item(self, w: Watcher, path: str = "") -> QListWidgetItem:
+    def _make_item(self, w: Watcher, path: str = "",
+                   fire_times: "list[str] | None" = None) -> QListWidgetItem:
         ctype = w.condition.type
         cond_label = _COND_LABELS.get(ctype, ctype)
         after_label = _AFTER_LABELS.get(w.after, w.after)
@@ -732,11 +740,15 @@ class WatcherEditorWidget(QWidget):
         )
         alert_icon = "  🔔" if w.alert_desktop else ""
         fname = os.path.basename(path) if path else ""
+        fire_str = ""
+        if fire_times:
+            fire_str = f"\n      🔥 本日 {len(fire_times)}回  最終: {fire_times[-1]}"
         text = (
             f"[{'✓' if w.enabled else '✗'}]  {w.title or w.id}  |  {cond_label}{alert_icon}"
             f"\n      → {handler_name}  /  {after_label}"
             f"  /  優先度:{w.priority}  冷却:{w.cooldown_s:.0f}s"
             + (f"\n      📄 {fname}" if fname else "")
+            + fire_str
         )
         item = QListWidgetItem(text)
         item.setData(Qt.UserRole, w.id)

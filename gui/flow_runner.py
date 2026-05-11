@@ -317,6 +317,8 @@ class WatcherState:
         self._last_fired_mono: dict[str, float] = {}  # watcher.id -> time
         self._miss_count: dict[str, int] = {}         # image_gone の連続外れ回数
         self._hit_count:  dict[str, int] = {}         # ocr_number / digit_threshold の連続ヒット回数
+        self._fire_log:   dict[str, list[str]] = {}   # watcher.id -> ["HH:MM", ...] 今日の発火時刻
+        self._fire_log_date: str = ""                 # YYYY-MM-DD
         self._fired_queue: deque[Watcher] = deque()
         self._paused = threading.Event()
         self._stop = threading.Event()
@@ -352,6 +354,17 @@ class WatcherState:
         self._last_fired_mono[watcher_id] = time.monotonic()
         self._miss_count[watcher_id] = 0
         self._hit_count[watcher_id]  = 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._fire_log_date != today:
+            self._fire_log.clear()
+            self._fire_log_date = today
+        self._fire_log.setdefault(watcher_id, []).append(
+            datetime.now().strftime("%H:%M")
+        )
+
+    def get_fire_log(self) -> dict[str, list[str]]:
+        """watcher_id → 今日の発火時刻リストを返す（スレッドセーフ読み取り）。"""
+        return dict(self._fire_log)
 
     # ------------------------------------------------------------------ impl
     def _next_interval(self, w: "Watcher") -> float:
@@ -550,6 +563,7 @@ def replay_flow(
     should_stop: StopFn = lambda: False,
     maintenance: list[MaintenanceEntry] | None = None,
     notify_fn: "Callable[[str, str], None] | None" = None,
+    on_watcher_state: "Callable[[WatcherState], None] | None" = None,
 ) -> None:
     """フローを再生する。"""
     schedule_only = not flow.main_sequence
@@ -581,6 +595,8 @@ def replay_flow(
 
     watcher_state = WatcherState(flow, serial, log)
     watcher_state.start()
+    if on_watcher_state:
+        on_watcher_state(watcher_state)
 
     def scene_interrupt() -> bool:
         """replay_scene に渡すストップ判定。schedule と watcher を評価。"""

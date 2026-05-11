@@ -155,6 +155,34 @@ global_watchers = self._mw.watcher_editor.get_watchers()
 flow.watchers = global_watchers + flow.watchers
 ```
 
+### 今日の発火回数表示
+
+ウォッチャーが実際にハンドラを実行するたびに `WatcherState.mark_fired()` が呼ばれる。そのタイミングで今日の発火時刻リストを記録し、ウォッチャータブのリストに表示する。
+
+```
+[✓]  体力低下  |  🔢 OCR数値  🔔
+      → 復活  /  restart_scene  /  優先度:900  冷却:120s
+      🔥 本日 3回  最終: 14:37
+```
+
+#### データフロー
+
+```
+WatcherState._fire_log          dict[watcher_id, list["HH:MM"]]
+  ↓ mark_fired() で記録
+  ↓ get_fire_log() で読み出し
+RunnerWidget._watcher_state     replay_flow の on_watcher_state コールバックで保持
+  ↓ get_fire_log() を公開
+WatcherEditorWidget._refresh_list()   30秒タイマー + 手動リロード時に呼び出し
+  ↓ _make_item(w, path, fire_times) で表示テキストに反映
+```
+
+#### 設計上の注意
+
+- `_fire_log` は日付をまたいだとき（`_fire_log_date != today`）に自動クリアされる
+- フロー停止中（`_watcher_state is None`）は空辞書を返すため、リストは発火表示なしで表示される
+- 30秒タイマーは `WatcherEditorWidget.__init__` で起動し、ウィジェットが破棄されるまで動き続ける
+
 ### 優先度
 
 - 値が**大きいほど優先**される（`-w.priority` 降順ソート）

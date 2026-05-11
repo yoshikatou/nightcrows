@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from .flow import load_flow
-from .flow_runner import replay_flow
+from .flow_runner import WatcherState, replay_flow
 from .maintenance import load_maintenance
 from .notify import show_desktop_alert
 
@@ -29,6 +29,7 @@ class RunnerWidget(QWidget):
         self._mw = main_window
         self.flow_thread: threading.Thread | None = None
         self.flow_stop = threading.Event()
+        self._watcher_state: WatcherState | None = None
         self._log_fh = None      # 現在書き込み中のファイルハンドル
         self._log_date = ""      # _log_fh に対応する日付 (YYYY-MM-DD)
 
@@ -71,6 +72,7 @@ class RunnerWidget(QWidget):
             return
 
         self.flow_stop.clear()
+        self._watcher_state = None
         self.status_label.setText(f"実行中: {flow.name}")
         self.state_changed.emit(True, f"実行中: {flow.name}")
         self._log(
@@ -95,6 +97,7 @@ class RunnerWidget(QWidget):
                     should_stop=self.flow_stop.is_set,
                     maintenance=maintenance,
                     notify_fn=show_desktop_alert,
+                    on_watcher_state=lambda ws: setattr(self, "_watcher_state", ws),
                 )
             except Exception as e:
                 self._log(f"エラー: {e}")
@@ -215,6 +218,11 @@ class RunnerWidget(QWidget):
                 pass
             self._log_fh = None
             self._log_date = ""
+
+    def get_fire_log(self) -> "dict[str, list[str]]":
+        """watcher_id → 今日の発火時刻リストを返す。実行中でなければ空辞書。"""
+        ws = self._watcher_state
+        return ws.get_fire_log() if ws else {}
 
     def _on_flow_finished(self) -> None:
         self.status_label.setText("停止中")

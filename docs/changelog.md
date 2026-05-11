@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-05-11
+
+### ウォッチャー発火回数の表示（`gui/flow_runner.py`, `gui/runner_widget.py`, `gui/watcher_editor.py`）
+
+**背景:** ウォッチャーが1日の中で何回・何時に発火したか確認する手段がログ閲覧しかなかった。ウォッチャータブを見れば即座に把握できるようにした。
+
+**実装内容:**
+
+#### `gui/flow_runner.py`
+
+- `WatcherState` に `_fire_log: dict[str, list[str]]`（watcher_id → 今日の発火時刻リスト）と `_fire_log_date: str` を追加
+- `mark_fired()` でハンドラ実行完了のたびに `datetime.now().strftime("%H:%M")` を記録。日付が変わったら自動クリア
+- `get_fire_log() -> dict[str, list[str]]` を追加（スレッドセーフな dict コピーを返す）
+- `replay_flow()` に `on_watcher_state: Callable[[WatcherState], None] | None` 引数を追加。`WatcherState` 生成直後に呼び出して外部に参照を渡す
+
+#### `gui/runner_widget.py`
+
+- `_watcher_state: WatcherState | None` フィールドを追加
+- `start()` 内で `on_watcher_state` コールバックを渡して参照をキャプチャ
+- `get_fire_log() -> dict[str, list[str]]` を公開 API として追加（停止中は空辞書）
+
+#### `gui/watcher_editor.py`
+
+- `_make_item()` に `fire_times: list[str] | None` 引数を追加。発火があれば `🔥 本日 N回  最終: HH:MM` を3行目に表示
+- `_refresh_list()` でフロー実行中なら `runner.get_fire_log()` を取得し各アイテムに反映
+- `__init__` に 30秒周期の `QTimer` を追加して発火カウントを自動更新
+
+**表示例:**
+```
+[✓]  体力低下  |  🔢 OCR数値
+      → 復活  /  restart_scene  /  優先度:900  冷却:120s
+      🔥 本日 3回  最終: 14:37
+```
+
+---
+
+## 2026-05-08
+
+### デバイス切断時にフロー・録画を自動停止（`gui/main.py`）
+
+**背景:** デバイスが切断されてもフローや録画がそのまま動き続けることがあった。
+
+**修正:** `_set_connected(None)` に `_stop_on_disconnect()` 呼び出しを追加。実行中のフロー・スケジュール録画・リアル録画をそれぞれ停止し、シーン編集ログに理由を記録する。scrcpy 終了による切断・手動切断のどちらでも動作する。
+
+---
+
 ## 2026-05-05
 
 ### PC 間同期: PUSH / PULL ボタン追加（`gui/main.py`, `gui/flow_editor.py`）
