@@ -70,11 +70,19 @@
       ]
     },
     {
-      "time": "09:00",
-      "target": "BF3＋84LV.json",
+      "time": "08:30",
+      "target": "BF3 ＋８８LV.json",
       "repeat": "weekly",
       "days": [
         1
+      ]
+    },
+    {
+      "time": "08:30",
+      "target": "BF3 ＋８８LV.json",
+      "repeat": "weekly",
+      "days": [
+        2
       ]
     },
     {
@@ -101,6 +109,16 @@
       "repeat": "weekly",
       "days": [
         1
+      ],
+      "retry_policy": "window",
+      "retry_window_min": 5
+    },
+    {
+      "time": "12:52",
+      "target": "BR.json",
+      "repeat": "weekly",
+      "days": [
+        2
       ],
       "retry_policy": "window",
       "retry_window_min": 5
@@ -165,6 +183,17 @@
       ],
       "days": [
         1
+      ]
+    },
+    {
+      "time": "13:05",
+      "target": "近隣の街でポーション補給.json",
+      "repeat": "weekly",
+      "sequence": [
+        "スケジューラー起動.json"
+      ],
+      "days": [
+        2
       ]
     },
     {
@@ -206,19 +235,27 @@
       ]
     },
     {
+      "time": "14:00",
+      "target": "BF3 ＋８８LV.json",
+      "repeat": "weekly",
+      "days": [
+        1
+      ]
+    },
+    {
+      "time": "14:30",
+      "target": "BF3 ＋８８LV.json",
+      "repeat": "weekly",
+      "days": [
+        2
+      ]
+    },
+    {
       "time": "15:00",
       "target": "BF3 ＋８８LV.json",
       "repeat": "weekly",
       "days": [
         0
-      ]
-    },
-    {
-      "time": "15:00",
-      "target": "BF3＋84LV.json",
-      "repeat": "weekly",
-      "days": [
-        1
       ]
     },
     {
