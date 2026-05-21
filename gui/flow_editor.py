@@ -616,6 +616,7 @@ class FlowEditorWidget(QWidget):
         self.table.cell_drag_moved.connect(self._on_cell_drag_moved)
         lay.addWidget(self.table, 1)
         self._highlight_today()
+        self._last_highlighted_day = _dt.now().weekday()
 
         # 現在時刻自動追従チェックボックス
         time_row = QHBoxLayout()
@@ -669,9 +670,23 @@ class FlowEditorWidget(QWidget):
 
     # -------------------------------------------------------------- 時刻追従
     def _on_time_tick(self) -> None:
+        today = _dt.now().weekday()
+        if today != self._last_highlighted_day:
+            self._unhighlight_day(self._last_highlighted_day)
+            self._last_highlighted_day = today
+            self._highlight_today()
         self.table.refresh_time_line()
         if self.chk_auto_scroll.isChecked():
             self.table.scroll_to_now()
+
+    def _unhighlight_day(self, col: int) -> None:
+        """指定列の今日ハイライト（プレースホルダーセル）を解除する。"""
+        if col < 0 or col >= 7:
+            return
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, col)
+            if item is not None and item.data(Qt.UserRole) == []:
+                self.table.setItem(row, col, None)
 
     def _on_auto_scroll_toggled(self, checked: bool) -> None:
         if checked:

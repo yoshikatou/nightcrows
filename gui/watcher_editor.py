@@ -17,7 +17,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPushButton, QRadioButton, QSpinBox, QSplitter, QStackedWidget, QVBoxLayout,
@@ -581,6 +581,486 @@ class _WatcherWizard(QDialog):
         return self._result
 
 
+# ================================================================== 経験値計測
+_EXP_METER_SETTINGS    = "exp_meter.json"
+_EXP_SAMPLE_INTERVAL_MS = 3 * 60 * 1000  # 3分
+_EXP_CURRENT_WINDOW    = 3               # 現在速度: 直近Nサンプルで算出
+_EXP_OCR_TRIES         = 3               # 1回の計測で取るOCR試行回数
+_EXP_OCR_INTERVAL_S    = 1.5            # OCR試行間隔（秒）
+
+
+class _RegionPickerDialog(QDialog):
+    """経験値%の表示領域をスクショから選択するダイアログ。"""
+
+    def __init__(self, serial: str | None, region: list[int],
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("経験値%の表示領域を設定")
+        self.setMinimumSize(800, 540)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        self._serial = serial
+        self._region = list(region)
+        self._img: np.ndarray | None = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        lay = QVBoxLayout(self)
+        hint = QLabel("スクショを取得して、経験値%が表示されている領域をドラッグで囲んでください")
+        hint.setStyleSheet("color: #555; font-size: 10px;")
+        lay.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_cap  = QPushButton("📷 スクショ取得")
+        btn_file = QPushButton("📂 ファイル")
+        btn_zoom = QPushButton("🔍 ズームリセット")
+        btn_cap.clicked.connect(self._capture)
+        btn_file.clicked.connect(self._open_file)
+        btn_zoom.clicked.connect(lambda: self._canvas.reset_zoom())
+        for b in (btn_cap, btn_file, btn_zoom):
+            btn_row.addWidget(b)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        self._canvas = ImageCanvas()
+        self._canvas.region_selected.connect(self._on_region)
+        lay.addWidget(self._canvas, 1)
+
+        self._region_lbl = QLabel(
+            "選択範囲: （未選択）" if not self._region else
+            f"選択範囲: x={self._region[0]} y={self._region[1]} "
+            f"w={self._region[2]} h={self._region[3]}"
+        )
+        lay.addWidget(self._region_lbl)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _capture(self) -> None:
+        if not self._serial:
+            QMessageBox.information(self, "情報", "デバイスが接続されていません")
+            return
+        try:
+            from .adb import screencap
+            png = screencap(self._serial)
+            arr = np.frombuffer(png, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("デコード失敗")
+            self._img = img
+            self._canvas.set_image(img)
+            if self._region:
+                QTimer.singleShot(50, lambda: self._canvas.highlight_region(*self._region))
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", str(e))
+
+    def _open_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "画像を開く", "", "画像 (*.png *.jpg *.bmp)")
+        if not path:
+            return
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        if img is None:
+            QMessageBox.critical(self, "エラー", f"開けません: {path}")
+            return
+        self._img = img
+        self._canvas.set_image(img)
+
+    def _on_region(self, x: int, y: int, w: int, h: int) -> None:
+        self._region = [x, y, w, h]
+        self._region_lbl.setText(f"選択範囲: x={x} y={y} w={w} h={h}")
+
+    def get_region(self) -> list[int]:
+        return self._region
+
+
+class ExpMeterWidget(QWidget):
+    """経験値計測パネル。5分おきにOCRして成長速度を計測・表示する。
+
+    - 現在速度: 直近3サンプル（約15分）の変化率
+    - 平均速度: リセット後の全サンプルから算出
+    - ロールオーバー: 値が30%超の急落でレベルアップと判定し累積に加算
+    """
+
+    _sample_ready  = Signal(float)
+    _sample_failed = Signal(str)
+
+    def __init__(self, main_window) -> None:
+        super().__init__()
+        self._mw          = main_window
+        self._region:      list[int]              = []
+        self._samples:     list[tuple[_dt, float]] = []  # (timestamp, accumulated_pct)
+        self._prev_raw:    float | None            = None
+        self._accumulated: float                   = 0.0
+        self._start_time:  _dt | None              = None
+        self._running      = False
+
+        self._sample_ready.connect(self._on_sample_ready)
+        self._sample_failed.connect(self._on_sample_failed)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(_EXP_SAMPLE_INTERVAL_MS)
+        self._timer.timeout.connect(self._do_sample)
+
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(60_000)
+        self._clock_timer.timeout.connect(self._update_display)
+        self._clock_timer.start()
+
+        self._build_ui()
+        self._load_settings()
+
+    # ---------------------------------------------------------------- UI
+    def _build_ui(self) -> None:
+        grp = QGroupBox("📊 経験値計測")
+        grp_lay = QVBoxLayout(grp)
+        grp_lay.setSpacing(4)
+
+        btn_row = QHBoxLayout()
+        self._btn_start = QPushButton("▶ 計測開始")
+        self._btn_start.setFixedWidth(110)
+        self._btn_start.clicked.connect(self._toggle_running)
+        btn_region = QPushButton("📍 領域設定")
+        btn_region.setFixedWidth(100)
+        btn_region.clicked.connect(self._pick_region)
+        self._btn_reset = QPushButton("🔄 リセット")
+        self._btn_reset.setFixedWidth(90)
+        self._btn_reset.clicked.connect(self._reset)
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: #666; font-size: 10px;")
+        btn_row.addWidget(self._btn_start)
+        btn_row.addWidget(btn_region)
+        btn_row.addWidget(self._btn_reset)
+        btn_row.addWidget(self._status_lbl)
+        btn_row.addStretch()
+        grp_lay.addLayout(btn_row)
+
+        hint_row = QHBoxLayout()
+        hint_lbl = QLabel("桁数ヒント:")
+        hint_lbl.setStyleSheet("font-size: 11px;")
+        self._rb_1digit = QRadioButton("1桁  (0〜9%台)")
+        self._rb_2digit = QRadioButton("2桁  (10〜99%台)")
+        self._rb_1digit.setChecked(True)
+        self._rb_1digit.toggled.connect(self._save_settings)
+        for rb in (self._rb_1digit, self._rb_2digit):
+            rb.setStyleSheet("font-size: 11px;")
+        hint_row.addWidget(hint_lbl)
+        hint_row.addWidget(self._rb_1digit)
+        hint_row.addWidget(self._rb_2digit)
+        hint_row.addStretch()
+        grp_lay.addLayout(hint_row)
+
+        stats_row1 = QHBoxLayout()
+        self._lbl_current       = QLabel("現在値:  —")
+        self._lbl_current_speed = QLabel("現在速度:  —")
+        self._lbl_compare       = QLabel("")
+        for lbl in (self._lbl_current, self._lbl_current_speed, self._lbl_compare):
+            lbl.setStyleSheet("font-size: 12px;")
+        stats_row1.addWidget(self._lbl_current)
+        stats_row1.addSpacing(24)
+        stats_row1.addWidget(self._lbl_current_speed)
+        stats_row1.addSpacing(8)
+        stats_row1.addWidget(self._lbl_compare)
+        stats_row1.addStretch()
+        grp_lay.addLayout(stats_row1)
+
+        stats_row2 = QHBoxLayout()
+        self._lbl_avg_speed = QLabel("平均速度:  —")
+        self._lbl_avg_speed.setStyleSheet("font-size: 12px;")
+        self._lbl_meta = QLabel("")
+        self._lbl_meta.setStyleSheet("color: #777; font-size: 10px;")
+        stats_row2.addWidget(self._lbl_avg_speed)
+        stats_row2.addSpacing(24)
+        stats_row2.addWidget(self._lbl_meta)
+        stats_row2.addStretch()
+        grp_lay.addLayout(stats_row2)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(grp)
+        self._update_display()
+
+    # ---------------------------------------------------------------- 設定
+    def _load_settings(self) -> None:
+        import json
+        if os.path.exists(_EXP_METER_SETTINGS):
+            try:
+                with open(_EXP_METER_SETTINGS, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                self._region = d.get("region", [])
+                if d.get("digit_hint", 1) == 2:
+                    self._rb_2digit.setChecked(True)
+            except Exception:
+                pass
+
+    def _save_settings(self) -> None:
+        import json
+        try:
+            with open(_EXP_METER_SETTINGS, "w", encoding="utf-8") as f:
+                json.dump({
+                    "region":     self._region,
+                    "digit_hint": 2 if self._rb_2digit.isChecked() else 1,
+                }, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _pick_region(self) -> None:
+        dlg = _RegionPickerDialog(
+            serial=self._mw.current_serial,
+            region=self._region,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            r = dlg.get_region()
+            if r:
+                self._region = r
+                self._save_settings()
+
+    # ---------------------------------------------------------------- 計測制御
+    def _toggle_running(self) -> None:
+        if self._running:
+            self._stop()
+        else:
+            self._start()
+
+    def _start(self) -> None:
+        if not self._region:
+            QMessageBox.information(
+                self, "情報",
+                "先に「📍 領域設定」で経験値%が表示される領域を選択してください。")
+            return
+        if not self._mw.current_serial:
+            QMessageBox.information(self, "情報", "デバイスが接続されていません。")
+            return
+        self._running = True
+        if self._start_time is None:
+            self._start_time = _dt.now()
+        self._btn_start.setText("■ 停止")
+        self._btn_start.setStyleSheet(
+            "QPushButton{background:#c62828;color:white;font-weight:bold;}")
+        self._timer.start()
+        self._status_lbl.setText("計測中…")
+        self._do_sample()
+
+    def _stop(self) -> None:
+        self._running = False
+        self._timer.stop()
+        self._btn_start.setText("▶ 計測開始")
+        self._btn_start.setStyleSheet("")
+        self._status_lbl.setText("停止中")
+
+    def _reset(self) -> None:
+        was_running = self._running
+        self._stop()
+        self._samples.clear()
+        self._prev_raw    = None
+        self._accumulated = 0.0
+        self._start_time  = None
+        self._update_display()
+        self._status_lbl.setText("")
+        if was_running:
+            self._start()
+
+    # ---------------------------------------------------------------- サンプリング
+    def _log(self, msg: str) -> None:
+        """logs/YYYY-MM-DD.log に経験値計測のログ行を追記する。"""
+        now = _dt.now()
+        line = f"[{now.strftime('%H:%M:%S')}] 📊 経験値計測: {msg}\n"
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        try:
+            with open(
+                os.path.join(log_dir, f"{now.strftime('%Y-%m-%d')}.log"),
+                "a", encoding="utf-8",
+            ) as f:
+                f.write(line)
+        except Exception:
+            pass
+
+    def _do_sample(self) -> None:
+        serial = self._mw.current_serial
+        if not serial or not self._region:
+            return
+        self._status_lbl.setText("取得中…")
+        digit_hint = 2 if self._rb_2digit.isChecked() else 1
+        import threading
+        threading.Thread(
+            target=self._sample_worker,
+            args=(serial, list(self._region), digit_hint),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _apply_digit_hint(ocr_raw: str, hint: int) -> float | None:
+        """OCR文字列に桁数ヒントを適用して float を返す。
+
+        数字のみ抽出 → hint 桁目の後ろに小数点を挿入 → float変換。
+        数字が hint 桁に満たない場合は None。
+        """
+        pure = "".join(c for c in ocr_raw if c.isdigit())
+        if len(pure) <= hint:
+            return None
+        fixed = pure[:hint] + "." + pure[hint:]
+        val = float(fixed)
+        return val if 0.0 <= val <= 100.0 else None
+
+    def _sample_worker(self, serial: str, region: list[int], digit_hint: int) -> None:
+        """_EXP_OCR_TRIES 回スクショ+OCRを行い、中央値を採用して emit する。"""
+        import time
+        try:
+            from .adb import screencap
+            from .flow_runner import _ocr_digits_best
+            config = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."
+            x, y, w, h = region
+            readings: list[float] = []
+            raw_log:  list[str]   = []
+
+            for i in range(_EXP_OCR_TRIES):
+                if i > 0:
+                    time.sleep(_EXP_OCR_INTERVAL_S)
+                try:
+                    png = screencap(serial)
+                    arr = np.frombuffer(png, dtype=np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        raw_log.append(f"#{i+1}:デコード失敗")
+                        continue
+                    ih, iw = img.shape[:2]
+                    crop = img[max(0, y):min(y + h, ih), max(0, x):min(x + w, iw)]
+                    if crop.size == 0:
+                        raw_log.append(f"#{i+1}:領域外")
+                        continue
+                    digits, _ = _ocr_digits_best(crop, config)
+                    if not digits:
+                        raw_log.append(f"#{i+1}:OCR失敗")
+                        continue
+                    val = self._apply_digit_hint(digits, digit_hint)
+                    if val is None:
+                        raw_log.append(f"#{i+1}:{digits!r}→ヒント適用失敗")
+                        continue
+                    readings.append(val)
+                    raw_log.append(f"#{i+1}:{digits!r}→{val:.4f}%")
+                except Exception as e:
+                    raw_log.append(f"#{i+1}:エラー({e})")
+
+            summary = "  ".join(raw_log)
+            if not readings:
+                self._sample_failed.emit(f"全試行失敗 [{summary}]")
+                return
+
+            readings.sort()
+            chosen = readings[len(readings) // 2]  # 中央値
+            self._last_ocr_detail = f"採用={chosen:.4f}%  hint={digit_hint}桁  試行=[{summary}]"
+            self._sample_ready.emit(chosen)
+        except Exception as e:
+            self._sample_failed.emit(str(e))
+
+    def _on_sample_ready(self, raw: float) -> None:
+        now = _dt.now()
+        detail = getattr(self, "_last_ocr_detail", "")
+        if self._prev_raw is None:
+            # 初回サンプル: 累積0からスタート
+            self._prev_raw    = raw
+            self._accumulated = 0.0
+            self._samples.append((now, 0.0))
+            self._log(f"初回取得  累積=0.0000%  {detail}")
+        else:
+            delta = raw - self._prev_raw
+            if delta < -30:
+                # レベルアップ: (100 - prev) + raw の分だけ増加
+                valid_delta = (100.0 - self._prev_raw) + raw
+                self._accumulated += valid_delta
+                self._prev_raw = raw
+                self._samples.append((now, self._accumulated))
+                self._log(
+                    f"LvUP検知  delta={delta:+.4f}%"
+                    f"  加算={valid_delta:.4f}%  累積={self._accumulated:.4f}%  {detail}"
+                )
+            elif delta < 0:
+                # OCR誤読とみなしてスキップ（prev_rawは更新しない）
+                self._log(
+                    f"誤読スキップ  delta={delta:+.4f}%"
+                    f"  prev={self._prev_raw:.4f}%  {detail}"
+                )
+                self._status_lbl.setText(
+                    f"⚠ 誤読スキップ ({raw:.2f}%)  最終: {now.strftime('%H:%M')}")
+                return
+            else:
+                self._accumulated += delta
+                self._prev_raw = raw
+                self._samples.append((now, self._accumulated))
+                self._log(
+                    f"取得  delta={delta:+.4f}%"
+                    f"  累積={self._accumulated:.4f}%  {detail}"
+                )
+
+        self._status_lbl.setText(f"最終取得: {now.strftime('%H:%M')}")
+        self._update_display()
+
+    def _on_sample_failed(self, msg: str) -> None:
+        self._log(f"エラー  {msg}")
+        self._status_lbl.setText(f"⚠ {msg}")
+
+    # ---------------------------------------------------------------- 速度計算・表示
+    @staticmethod
+    def _calc_speed(samples: list[tuple[_dt, float]]) -> float | None:
+        """サンプルリスト（2点以上）から %/h を返す。"""
+        if len(samples) < 2:
+            return None
+        elapsed_h = (samples[-1][0] - samples[0][0]).total_seconds() / 3600
+        if elapsed_h <= 0:
+            return None
+        return (samples[-1][1] - samples[0][1]) / elapsed_h
+
+    def _update_display(self) -> None:
+        n = len(self._samples)
+
+        self._lbl_current.setText(
+            f"現在値:  {self._prev_raw:.2f}%"
+            if self._prev_raw is not None else "現在値:  —"
+        )
+
+        avg_spd = self._calc_speed(self._samples)
+        cur_spd = (self._calc_speed(self._samples[-_EXP_CURRENT_WINDOW:])
+                   if n >= _EXP_CURRENT_WINDOW else None)
+
+        self._lbl_avg_speed.setText(
+            f"平均速度:  {avg_spd:.1f} %/h" if avg_spd is not None else "平均速度:  —"
+        )
+        if cur_spd is not None:
+            self._lbl_current_speed.setText(f"現在速度:  {cur_spd:.1f} %/h")
+        elif n > 0:
+            self._lbl_current_speed.setText(
+                f"現在速度:  — (あと{_EXP_CURRENT_WINDOW - n}サンプル)")
+        else:
+            self._lbl_current_speed.setText("現在速度:  —")
+
+        if cur_spd is not None and avg_spd is not None:
+            diff = cur_spd - avg_spd
+            if diff >= 0.1:
+                self._lbl_compare.setText(f"↑ 平均より +{diff:.1f}%/h")
+                self._lbl_compare.setStyleSheet(
+                    "color:#1b5e20; font-weight:bold; font-size:12px;")
+            elif diff <= -0.1:
+                self._lbl_compare.setText(f"↓ 平均より {diff:.1f}%/h")
+                self._lbl_compare.setStyleSheet(
+                    "color:#c62828; font-weight:bold; font-size:12px;")
+            else:
+                self._lbl_compare.setText("≈ 平均と同程度")
+                self._lbl_compare.setStyleSheet("color:#555; font-size:12px;")
+        else:
+            self._lbl_compare.setText("")
+
+        elapsed_str = "—"
+        if self._start_time:
+            s = int((_dt.now() - self._start_time).total_seconds())
+            h, rem = divmod(s, 3600)
+            elapsed_str = f"{h}h {rem // 60:02d}m" if h > 0 else f"{rem // 60}m"
+        last_str = self._samples[-1][0].strftime("%H:%M") if self._samples else "—"
+        self._lbl_meta.setText(f"計測: {elapsed_str}  {n}サンプル  最終: {last_str}")
+
+
 # ================================================================== メインウィジェット
 class WatcherEditorWidget(QWidget):
     """ウォッチャー一覧と編集を提供するタブウィジェット。"""
@@ -658,6 +1138,9 @@ class WatcherEditorWidget(QWidget):
         self.list.currentRowChanged.connect(self._on_selection_changed)
         self.list.itemDoubleClicked.connect(lambda _: self._edit())
         self._on_selection_changed(-1)
+
+        self._exp_meter = ExpMeterWidget(self._mw)
+        lay.addWidget(self._exp_meter)
 
     # --------------------------------------------------------- ファイル操作
     def _load_from_dir(self) -> None:

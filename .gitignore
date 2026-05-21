@@ -4,5 +4,6 @@ __pycache__/
 debug/
 recordings/
 settings.json
+exp_meter.json
 logs/
 refs/
