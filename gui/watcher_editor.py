@@ -776,6 +776,13 @@ class ExpMeterWidget(QWidget):
         stats_row2.addStretch()
         grp_lay.addLayout(stats_row2)
 
+        stats_row3 = QHBoxLayout()
+        self._lbl_eta = QLabel("LvUP予測:  —")
+        self._lbl_eta.setStyleSheet("font-size: 12px;")
+        stats_row3.addWidget(self._lbl_eta)
+        stats_row3.addStretch()
+        grp_lay.addLayout(stats_row3)
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(grp)
@@ -1081,6 +1088,24 @@ class ExpMeterWidget(QWidget):
             elapsed_str = f"{h}h {rem // 60:02d}m" if h > 0 else f"{rem // 60}m"
         last_str = self._samples[-1][0].strftime("%H:%M") if self._samples else "—"
         self._lbl_meta.setText(f"計測: {elapsed_str}  {n}サンプル  最終: {last_str}")
+
+        # LvUP予測
+        if self._prev_raw is not None:
+            remaining = 100.0 - self._prev_raw
+            parts = []
+            for spd, label in ((cur_spd, "現在"), (avg_spd, "平均")):
+                if spd and spd > 0:
+                    eta_min = remaining / spd * 60
+                    if eta_min >= 60:
+                        eta_h, eta_m = divmod(int(eta_min), 60)
+                        parts.append(f"{eta_h}h{eta_m:02d}m（{label}）")
+                    else:
+                        parts.append(f"{int(eta_min)}分（{label}）")
+            self._lbl_eta.setText(
+                "LvUP予測:  " + "  /  ".join(parts) if parts else "LvUP予測:  —"
+            )
+        else:
+            self._lbl_eta.setText("LvUP予測:  —")
 
 
 # ================================================================== メインウィジェット
