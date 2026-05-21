@@ -5,4 +5,11 @@ mobile/debug/
 mobile/recordings/
 mobile/settings.json
 mobile/logs/
+pc/settings.json
+pc/exp_meter.json
+pc/logs/
+pc/build/
+pc/dist/
+pc/*.spec
+pc/tools/
 refs/

@@ -21,9 +21,45 @@ cd mobile
 
 依存インストール: `pip install -r requirements.txt`
 
-### PC 用ツール
+### PC 用ツール（経験値メーター）
 
-準備中（`pc/` 配下に実装予定。最終的には exe にビルドして配布）。
+ルートから:
+
+```
+run_pc.bat
+```
+
+または手動で:
+
+```
+cd pc
+..\.venv\Scripts\python.exe run_exp_meter.py
+```
+
+#### exe ビルド
+
+配布用の単一 exe を生成する場合:
+
+```
+cd pc
+build_exe.bat
+```
+
+`pc/dist/ExpMeter.exe` が生成されます（約100MB）。配布時は exe 単体でOK。
+
+**配布時の注意**:
+- 受け取った人にも Tesseract のインストールが必要（exe 起動時に未検出なら案内ダイアログが出る）
+- `settings.json` / `exp_meter.json` / `logs/` は exe と同じフォルダに生成される
+- 初回起動はテンプフォルダへの展開で数秒かかる
+
+#### 事前準備: Tesseract OCR のインストール
+
+経験値読み取りに [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) が必要です。
+
+- **インストーラー**: 上記ページから `tesseract-ocr-w64-setup-*.exe` をDL・実行
+- **winget**: `winget install --id UB-Mannheim.TesseractOCR -e`
+
+既定の場所にインストールすればアプリが自動検出します。別の場所にインストールした場合は設定ウィンドウから「変更…」で tesseract.exe を指定してください。
 
 ## ドキュメント
 
