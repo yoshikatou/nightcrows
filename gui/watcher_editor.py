@@ -781,18 +781,32 @@ class ExpMeterWidget(QWidget):
         outer.addWidget(grp)
         self._update_display()
 
-    # ---------------------------------------------------------------- 設定
+    # ---------------------------------------------------------------- 設定・データ永続化
     def _load_settings(self) -> None:
         import json
-        if os.path.exists(_EXP_METER_SETTINGS):
-            try:
-                with open(_EXP_METER_SETTINGS, "r", encoding="utf-8") as f:
-                    d = json.load(f)
-                self._region = d.get("region", [])
-                if d.get("digit_hint", 1) == 2:
-                    self._rb_2digit.setChecked(True)
-            except Exception:
-                pass
+        if not os.path.exists(_EXP_METER_SETTINGS):
+            return
+        try:
+            with open(_EXP_METER_SETTINGS, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            self._region = d.get("region", [])
+            if d.get("digit_hint", 1) == 2:
+                self._rb_2digit.setChecked(True)
+            # サンプルデータの復元
+            raw_samples = d.get("samples", [])
+            self._samples = [
+                (_dt.fromisoformat(ts), float(acc))
+                for ts, acc in raw_samples
+            ]
+            self._accumulated = float(d.get("accumulated", 0.0))
+            self._prev_raw    = (float(d["prev_raw"]) if d.get("prev_raw") is not None
+                                 else None)
+            st = d.get("start_time")
+            self._start_time  = _dt.fromisoformat(st) if st else None
+            if self._samples:
+                self._update_display()
+        except Exception:
+            pass
 
     def _save_settings(self) -> None:
         import json
@@ -801,7 +815,13 @@ class ExpMeterWidget(QWidget):
                 json.dump({
                     "region":     self._region,
                     "digit_hint": 2 if self._rb_2digit.isChecked() else 1,
-                }, f, ensure_ascii=False)
+                    "samples":    [[ts.isoformat(), acc]
+                                   for ts, acc in self._samples],
+                    "accumulated": self._accumulated,
+                    "prev_raw":    self._prev_raw,
+                    "start_time":  (self._start_time.isoformat()
+                                    if self._start_time else None),
+                }, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -858,6 +878,7 @@ class ExpMeterWidget(QWidget):
         self._accumulated = 0.0
         self._start_time  = None
         self._update_display()
+        self._save_settings()
         self._status_lbl.setText("")
         if was_running:
             self._start()
@@ -997,6 +1018,7 @@ class ExpMeterWidget(QWidget):
 
         self._status_lbl.setText(f"最終取得: {now.strftime('%H:%M')}")
         self._update_display()
+        self._save_settings()
 
     def _on_sample_failed(self, msg: str) -> None:
         self._log(f"エラー  {msg}")
