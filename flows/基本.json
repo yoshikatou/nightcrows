@@ -86,8 +86,8 @@
       ]
     },
     {
-      "time": "09:00",
-      "target": "BF3 ＋８８LV.json",
+      "time": "08:30",
+      "target": "BF3＋92LV.json",
       "repeat": "weekly",
       "days": [
         3
@@ -243,11 +243,11 @@
       ]
     },
     {
-      "time": "14:30",
-      "target": "BF3 ＋８８LV.json",
+      "time": "14:00",
+      "target": "BF3＋92LV.json",
       "repeat": "weekly",
       "days": [
-        2
+        3
       ]
     },
     {
@@ -255,7 +255,7 @@
       "target": "BF3 ＋８８LV.json",
       "repeat": "weekly",
       "days": [
-        3
+        2
       ]
     },
     {
