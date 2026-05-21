@@ -253,7 +253,10 @@ class MainWindow(QMainWindow):
         def _watch():
             code = proc.wait()          # プロセスが終わるまでブロック
             if self.scrcpy_proc is proc:    # まだ同じプロセスを管理中なら通知
-                self.scrcpy_exited_signal.emit(code)
+                try:
+                    self.scrcpy_exited_signal.emit(code)
+                except RuntimeError:
+                    pass  # アプリ終了直後にスレッドが終了した場合は無視
 
         threading.Thread(target=_watch, daemon=True).start()
 
