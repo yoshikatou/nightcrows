@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-05-22（Pico HID マウス）
+
+### Raspberry Pi Pico による物理マウス入力実装
+
+**背景:** `SendInput` は Nightcrows の `LLMHF_INJECTED` チート検知で弾かれることを確認。Pico を USB HID デバイスとして使うことで物理入力相当を実現。
+
+**実装内容:**
+
+- `pc/pico/code.py`: CircuitPython ファームウェア。コマンド: `PING` / `HOLD` / `RELEASE` / `CLICK` / `MOVE`
+- `pc/pico_mouse.py`: PC 側コントローラ `PicoMouse`。キャリブレーション・イーズアウト移動・フィードバック補正を実装
+- `pc/move_test.py`: 対話テストツール（c/1〜8/q の 9 モード）
+- 設計書: `docs/pc_pico_mouse.md`
+
+**移動精度の仕組み:**
+
+1. `calibrate()`: HID 60 単位送信 → 実移動画素数 → `speed_scale` を算出
+2. `move_to()`: イーズアウト（残距離 // 3 でステップを自動縮小）+ speed_scale 補正
+3. `move_to_accurate()`: `move_to` 後に `GetCursorPos` でフィードバック補正（最大 8 回）
+
+キャリブレーション済みで誤差 ±1〜3px、1〜3 回補正で収束。
+
+---
+
 ## 2026-05-22
 
 ### 経験値計測の OCR 誤読耐性を強化（`pc/gui/exp_meter.py`）

@@ -5,11 +5,11 @@ CIRCUITPY ドライブの code.py として配置する。
 USB CDC シリアル経由でコマンドを受信し、HID マウス操作を実行する。
 
 コマンド形式 (改行区切り):
-    CLICK L [hold_ms]   左クリック (デフォルト 30ms)
-    CLICK R [hold_ms]   右クリック
-    CLICK M [hold_ms]   中クリック
-    MOVE dx dy          相対移動 (-127〜127)
     PING                疎通確認
+    HOLD L/R/M          ボタン押し続ける
+    RELEASE [L/R/M]     ボタンを離す (省略で全解放)
+    CLICK L/R/M [ms]    クリック (デフォルト 30ms)
+    MOVE dx dy          相対移動 (-127〜127)
 
 レスポンス:
     OK      成功
@@ -36,6 +36,33 @@ while True:
     cmd = parts[0].upper()
 
     if cmd == "PING":
+        print("OK")
+
+    elif cmd == "HOLD":
+        btn_char = parts[1].upper() if len(parts) > 1 else "L"
+        btn_map = {
+            "L": Mouse.LEFT_BUTTON,
+            "R": Mouse.RIGHT_BUTTON,
+            "M": Mouse.MIDDLE_BUTTON,
+        }
+        btn = btn_map.get(btn_char)
+        if btn is None:
+            print("ERROR unknown button")
+            continue
+        mouse.press(btn)
+        print("OK")
+
+    elif cmd == "RELEASE":
+        btn_char = parts[1].upper() if len(parts) > 1 else ""
+        btn_map = {
+            "L": Mouse.LEFT_BUTTON,
+            "R": Mouse.RIGHT_BUTTON,
+            "M": Mouse.MIDDLE_BUTTON,
+        }
+        if btn_char in btn_map:
+            mouse.release(btn_map[btn_char])
+        else:
+            mouse.release_all()
         print("OK")
 
     elif cmd == "CLICK":

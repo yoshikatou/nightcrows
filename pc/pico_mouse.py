@@ -93,6 +93,7 @@ class PicoMouse:
         self._user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 
         self.port = resolved
+        self._speed_scale: float = 1.0  # HID 1単位あたりの実移動画素数（calibrate() で測定）
         self.ping()  # 疎通確認
 
     def ping(self) -> None:
@@ -124,6 +125,109 @@ class PicoMouse:
         resp = self._cmd(f"MOVE {dx} {dy}")
         if resp != "OK":
             raise RuntimeError(f"Pico MOVE エラー: {resp}")
+
+    def calibrate(self, test_hid: int = 60) -> float:
+        """ポインター速度スケールを測定する（HID 1単位 = 何画素か）。
+
+        小さな HID 移動を送り、実際の画素移動量から倍率を算出して保存する。
+        move_to() はこの値を使って HID 単位を自動補正する。
+        """
+        bx, by = self.get_cursor_pos()
+        self.move(test_hid, 0)
+        time.sleep(0.1)
+        ax, ay = self.get_cursor_pos()
+        actual = ax - bx
+        self.move_cursor(bx, by)  # SetCursorPos で元位置に戻す
+        time.sleep(0.05)
+
+        if actual == 0:
+            self._speed_scale = 1.0
+        else:
+            self._speed_scale = actual / test_hid
+        return self._speed_scale
+
+    def press(self, button: str = "L") -> None:
+        """マウスボタンを押したまま（離さない）。"""
+        resp = self._cmd(f"HOLD {button.upper()}")
+        if resp != "OK":
+            raise RuntimeError(f"Pico HOLD エラー: {resp}")
+
+    def release(self, button: str = "") -> None:
+        """マウスボタンを離す。button省略で全ボタン解放。"""
+        resp = self._cmd(f"RELEASE {button.upper()}")
+        if resp != "OK":
+            raise RuntimeError(f"Pico RELEASE エラー: {resp}")
+
+    def move_to(
+        self,
+        x: int,
+        y: int,
+        max_step: int = 20,
+        min_step: int = 1,
+        delay: float = 0.02,
+    ) -> None:
+        """Pico HID の相対移動でカーソルを目標座標まで動かす。
+
+        残距離が縮むにつれてステップを自動的に小さくし、
+        目標付近では低速・高精度になる（イーズアウト）。
+
+        max_step: 遠距離時の最大移動量 (px/event)
+        min_step: 近距離時の最小移動量 (px/event)
+        delay:    イベント間の待機秒数
+        """
+        cx, cy = self.get_cursor_pos()
+        dx, dy = x - cx, y - cy
+        while dx != 0 or dy != 0:
+            dist = max(abs(dx), abs(dy))
+            # 残距離に比例してステップを縮小（イーズアウト）
+            pix_step = max(min_step, min(max_step, dist // 3))
+            px = max(-pix_step, min(pix_step, dx))
+            py = max(-pix_step, min(pix_step, dy))
+            # ポインター速度スケールで HID 単位に変換
+            hx = int(px / self._speed_scale)
+            hy = int(py / self._speed_scale)
+            if hx == 0 and hy == 0:
+                break  # 端数が小さすぎて HID に変換できない → 補正に任せる
+            self.move(hx, hy)
+            dx -= px
+            dy -= py
+            if delay > 0:
+                time.sleep(delay)
+
+    def move_to_accurate(
+        self,
+        x: int,
+        y: int,
+        tolerance: int = 3,
+        max_iter: int = 8,
+        step: int = 20,
+        delay: float = 0.02,
+        on_iter: "callable | None" = None,
+    ) -> tuple[int, int]:
+        """誤差を自動補正しながら目標座標へ移動する。
+
+        GetCursorPos で実際の着地点を計測し、残差があれば補正移動を繰り返す。
+        ポインター加速が有効でも収束する（ただし iterations が増える）。
+
+        on_iter: (iteration, actual_x, actual_y, error_x, error_y) を受け取るコールバック。
+        戻り値: 最終的な (actual_x, actual_y)。
+        """
+        self.move_to(x, y, max_step=step, delay=delay)
+
+        for i in range(max_iter):
+            time.sleep(0.05)
+            cx, cy = self.get_cursor_pos()
+            ex, ey = x - cx, y - cy
+            if on_iter:
+                on_iter(i, cx, cy, ex, ey)
+            if abs(ex) <= tolerance and abs(ey) <= tolerance:
+                break
+            # 補正: 残差を小ステップで送る（大きな加速を避けるため max_step 小さく）
+            corr_step = max(1, min(10, max(abs(ex), abs(ey)) // 2))
+            self.move_to(cx + ex, cy + ey, max_step=corr_step, delay=delay)
+
+        time.sleep(0.05)
+        return self.get_cursor_pos()
 
     def _cmd(self, cmd: str) -> str:
         self._ser.write((cmd + "\n").encode())
