@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-05-22（PC フロー制御プログラム実装）
+
+### PC フロー制御プログラムを実装（ステップ 1〜4）
+
+**背景:** 設計書（`docs/pc_flow_design.md`）に基づき、PC 版のフロー自動実行システムを実装した。mobile 版の ADB 操作を Pico HID マウス + Win32 キャプチャに置き換えた PC 専用システム。
+
+**実装内容:**
+
+- `pc/gui/pc_scene.py`: シーン実行エンジン。`snapshot`（テンプレートマッチング待機）/ `tap`（Pico クリック）/ `swipe`（Pico プレス＋移動＋リリース）/ `wait_fixed` の4ステップタイプを実装。座標はウィンドウ相対比率（0.0〜1.0）で指定し、毎ステップ `win32gui` で絶対座標に変換。
+- `pc/gui/pc_flow.py`: スケジューラー。`PcFlowRunner`（`QObject`）がバックグラウンドスレッドで時刻を監視し、発火時に `pc_scene.run_pc_scene` を呼び出す。mobile 版と同じ JSON フォーマットを mobile への依存なしで再実装。Qt シグナル（`log_message` / `scene_started` / `step_updated` / `state_changed` / `next_schedule_changed`）でメインスレッドに通知。
+- `pc/gui/pc_main.py`: メインウィンドウ（PySide6）。ゲームウィンドウ選択・Pico 接続・フロー開始/停止・スケジュール一覧・次回予定表示・経験値メーター統合のセクションで構成。
+- `pc/run_pc_flow.py`: エントリーポイント。`_ensure_cwd()` で実行ディレクトリを統一（PyInstaller exe にも対応）。
+- `pc/flows/基本_pc.json`: フロー JSON テンプレート（スケジュール空、シーン追加用）。
+- `pc/scenes/`, `pc/flows/` ディレクトリを作成。
+
+**設計上の判断:**
+
+- **swipe の duration_ms 制御:** `n_steps = dist // 15`、`step_delay = duration_ms / 1000 / n_steps` で PicoMouse.move_to() の遅延を計算。HID イーズアウトと組み合わせて自然なスワイプを実現。
+- **Pico 未接続フォールバック:** インポートを `try/except ImportError` でラップし、Pico なしでも GUI を起動可能。tap/swipe のみスキップ。
+- **起動時スケジュールスキップ:** 起動時刻より前のエントリを `last_fired` に事前登録し重複実行を防止。
+
+**設計書:** `docs/pc_flow_system.md` を新規作成（アーキテクチャ図・JSON フォーマット仕様・依存関係を含む）。
+
+**環境対応:** `.venv` に `pywin32` が未インストールだったため `pip install pywin32` を実施。
+
+---
+
 ## 2026-05-22（Pico HID マウス）
 
 ### Raspberry Pi Pico による物理マウス入力実装
