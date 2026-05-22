@@ -6,6 +6,14 @@
   "after_main": "stay",
   "schedule": [
     {
+      "time": "00:00",
+      "target": "BF3＋92LV.json",
+      "repeat": "weekly",
+      "days": [
+        5
+      ]
+    },
+    {
       "time": "00:30",
       "target": "BF3＋84LV.json",
       "repeat": "weekly",
@@ -268,15 +276,7 @@
     },
     {
       "time": "15:00",
-      "target": "激戦地2 80LV.json",
-      "repeat": "weekly",
-      "days": [
-        4
-      ]
-    },
-    {
-      "time": "15:00",
-      "target": "激戦地2 80LV.json",
+      "target": "BF3＋92LV.json",
       "repeat": "weekly",
       "days": [
         5
