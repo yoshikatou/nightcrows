@@ -1,0 +1,9 @@
+{
+  "name": "基本_pc",
+  "version": 1,
+  "schedule": [],
+  "watchers": [],
+  "settings": {
+    "polling_interval_s": 1.0
+  }
+}
