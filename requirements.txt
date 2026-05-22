@@ -3,3 +3,4 @@ opencv-python>=4.13
 numpy>=1.26
 pytesseract>=0.3
 pywin32>=308; sys_platform == "win32"
+pyserial>=3.5
