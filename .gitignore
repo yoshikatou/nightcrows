@@ -12,4 +12,5 @@ pc/build/
 pc/dist/
 pc/*.spec
 pc/tools/
+pc/snapshots/
 refs/

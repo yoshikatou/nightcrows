@@ -4,6 +4,61 @@
 
 ---
 
+## 2026-05-22（シーン編集 UI 実装・ズーム/再生/テスト機能）
+
+### `pc/gui/pc_scene.py` に `tap_image` ステップを追加
+
+**背景:** モバイル版にあるテンプレートマッチ系ステップを PC でも使えるようにしたい。既存の `snapshot` は実質 `wait_image`（テンプレ一致を待つ）として動作していたため、不足していた「画像を見つけてタップ」のみを新規追加。
+
+**実装内容:**
+- `tap_image` ステップ: `cv2.matchTemplate(TM_CCOEFF_NORMED)` で検出 → 一致位置の中心 + `tap_offset_x/y` を `mouse.click()`
+- パラメータ: `template` (PNG パス), `threshold`, `timeout_s`, `region` (検索範囲を [rx, ry, rw, rh] で絞る), `button`, `duration_ms`, `tap_offset_x/y`
+- region による検索範囲指定で誤検出を抑制し、検出も高速化
+
+### `pc/gui/pc_canvas.py` を新規作成
+
+**役割:** シーン編集用のスナップショット表示キャンバス。
+
+- スナップショット PNG をアスペクト比保持で表示
+- **クリック** → `clicked(rx, ry)` シグナル（正規化 0.0〜1.0）
+- **ドラッグ** → `region_selected(rx, ry, rw, rh)` シグナル
+- タップマーカー（黄色 ●）と領域マーカー（青枠）を重ね描き
+- **右クリック保持 + ホイール**でズーム（1.0〜10.0 倍、1.2 倍刻み、マウス位置を中心に拡大）
+- **右ボタンドラッグ**（拡大時のみ）でパン
+
+### `pc/gui/pc_scene_editor.py` を新規作成（独立ウィンドウ）
+
+**役割:** メインの 1/4 縦長画面とは独立した、約 1000×800 の編集ウィンドウ。
+
+- ヘッダー: シーン名・対象ウィンドウ・保存
+- 中央 QSplitter: 左にキャンバス（広め）、右にステップ一覧 + 操作
+- **スクショ取得**: `capture_window` → `snapshots/snap_*.png` 保存 + `snapshot` ステップ追加
+- **キャンバス左クリック** → `tap` ステップ追加（オプションで `wait_fixed` 連結）
+- **キャンバス左ドラッグ** → メニュー: `wait_image` / `tap_image` / `swipe`
+  - `wait_image` / `tap_image` はテンプレを `templates/<scene名>/tpl_*.png` に保存
+- **「タップ後に待機」チェックボックス + 秒数入力**: ON のときクリック時に `tap` + `wait_fixed` を 2 ステップ連続で追加（デフォルト ON / 1.5 秒）
+- ステップ一覧: 削除・↑↓ 移動
+- **「選択行を実行」**: ステップ単独実行（バックグラウンドスレッド）
+- **「▶ 再生 / ■ 停止」**: シーン全体を順次実行、停止フラグで中断
+- 実行ログを QTextEdit に出力（Qt シグナル経由でメインスレッドに通知）
+- Pico は `mouse_provider` Callable で常に最新の接続状態を取得（再接続にも追従）
+
+### `pc/gui/pc_main.py` 作成タブを実装
+
+- 「作成」placeholder を **シーン一覧 + 編集起動** に差し替え
+- シーン JSON 一覧 (QListWidget)、ボタン: 新規 / 編集… / 複製 / 削除 / 一覧更新
+- ダブルクリック / 「編集…」で `SceneEditorWindow` を **別ウィンドウ** として開く
+- メインの縦長 1/4 はそのまま、編集だけ広めの画面で行う運用に最適化
+
+### 設計上のポイント
+
+- **座標系**: 全てクライアント領域相対 (0.0〜1.0)。ウィンドウサイズ変化に追従
+- **保存先**: シーン = `pc/scenes/<name>.json` / スナップ = `pc/snapshots/snap_*.png` / テンプレ = `pc/templates/<scene名>/tpl_*.png`
+- **画像判定**: `cv2.matchTemplate(TM_CCOEFF_NORMED)` を実行エンジン側で統一
+- **実行の非同期化**: `threading.Thread` + Qt シグナル。`should_stop` で中断ハンドリング
+
+---
+
 ## 2026-05-22（PC GUI 縦長タブ化とテストタブ・ドラッグ戦略確定）
 
 ### `pc/gui/pc_main.py` を縦長タブ構成にリファクタ

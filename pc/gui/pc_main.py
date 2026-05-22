@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -47,6 +48,8 @@ from .pc_flow import (
     entry_scenes,
     load_pc_flow,
 )
+from .pc_scene import SCENES_DIR
+from .pc_scene_editor import SceneEditorWindow
 from .settings import load_settings, save_settings
 from .window_picker import WindowPickerDialog, find_hwnd_by_title
 
@@ -337,12 +340,116 @@ class PcFlowWindow(QWidget):
             "未実装。次フェーズで mobile/gui/watcher_editor.py から移植予定。",
         )
 
-    # ---- フロー作成タブ（未実装）
+    # ---- 作成タブ: シーン一覧 + 編集起動（別ウィンドウ）
     def _build_tab_editor(self) -> QWidget:
-        return self._build_placeholder(
-            "フロー作成",
-            "未実装。次フェーズで mobile/gui/flow_editor.py（週間スケジュール）から移植予定。",
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 8, 6, 6)
+        lay.setSpacing(6)
+
+        lay.addWidget(QLabel("シーン一覧:"))
+        self._list_scenes = QListWidget()
+        self._list_scenes.itemDoubleClicked.connect(lambda _i: self._open_scene_editor())
+        lay.addWidget(self._list_scenes, 1)
+
+        btn_row = QHBoxLayout()
+        btn_new  = QPushButton("新規")
+        btn_new.clicked.connect(self._new_scene)
+        btn_edit = QPushButton("編集…")
+        btn_edit.clicked.connect(self._open_scene_editor)
+        btn_dup  = QPushButton("複製")
+        btn_dup.clicked.connect(self._duplicate_scene)
+        btn_del  = QPushButton("削除")
+        btn_del.clicked.connect(self._delete_scene)
+        btn_row.addWidget(btn_new)
+        btn_row.addWidget(btn_edit)
+        btn_row.addWidget(btn_dup)
+        btn_row.addWidget(btn_del)
+        lay.addLayout(btn_row)
+
+        btn_refresh = QPushButton("一覧更新")
+        btn_refresh.clicked.connect(self._reload_scenes_list)
+        lay.addWidget(btn_refresh)
+
+        hint = QLabel(
+            "編集は別ウィンドウ（大きめ）で開きます。"
+            "対象ウィンドウはヘッダーの設定が引き継がれます。"
         )
+        hint.setStyleSheet("color:#666; font-size:11px;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self._reload_scenes_list()
+        # 編集ウィンドウへの参照を保持（GC で閉じないように）
+        self._scene_editors: list[SceneEditorWindow] = []
+        return w
+
+    # ---- シーン一覧の操作（作成タブ）
+    def _reload_scenes_list(self) -> None:
+        self._list_scenes.clear()
+        if not os.path.isdir(SCENES_DIR):
+            return
+        for fname in sorted(os.listdir(SCENES_DIR)):
+            if fname.endswith(".json"):
+                item = QListWidgetItem(fname)
+                item.setData(Qt.UserRole, os.path.join(SCENES_DIR, fname))
+                self._list_scenes.addItem(item)
+
+    def _selected_scene_path(self) -> str | None:
+        item = self._list_scenes.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.UserRole)
+
+    def _open_scene_editor(self) -> None:
+        path = self._selected_scene_path()
+        title = self._settings.get("window_title", "")
+        win = SceneEditorWindow(
+            path, window_title=title, mouse_provider=lambda: self._mouse,
+        )
+        win.destroyed.connect(lambda _: self._reload_scenes_list())
+        self._scene_editors.append(win)
+        win.show()
+
+    def _new_scene(self) -> None:
+        title = self._settings.get("window_title", "")
+        win = SceneEditorWindow(
+            None, window_title=title, mouse_provider=lambda: self._mouse,
+        )
+        win.destroyed.connect(lambda _: self._reload_scenes_list())
+        self._scene_editors.append(win)
+        win.show()
+
+    def _duplicate_scene(self) -> None:
+        path = self._selected_scene_path()
+        if not path or not os.path.exists(path):
+            return
+        from shutil import copyfile
+        base = os.path.splitext(os.path.basename(path))[0]
+        new_path = os.path.join(SCENES_DIR, f"{base}_copy.json")
+        idx = 2
+        while os.path.exists(new_path):
+            new_path = os.path.join(SCENES_DIR, f"{base}_copy{idx}.json")
+            idx += 1
+        copyfile(path, new_path)
+        self._reload_scenes_list()
+
+    def _delete_scene(self) -> None:
+        path = self._selected_scene_path()
+        if not path or not os.path.exists(path):
+            return
+        from PySide6.QtWidgets import QMessageBox
+        if QMessageBox.question(
+            self, "削除確認",
+            f"{os.path.basename(path)} を削除しますか？",
+        ) != QMessageBox.Yes:
+            return
+        try:
+            os.remove(path)
+        except Exception as e:
+            QMessageBox.warning(self, "削除失敗", str(e))
+            return
+        self._reload_scenes_list()
 
     # ---- ログタブ
     def _build_tab_log(self) -> QWidget:

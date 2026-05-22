@@ -2,6 +2,9 @@
 
 PC シーン JSON を読み込み、各ステップを順次実行する:
 - snapshot:   Win32 キャプチャ + cv2.matchTemplate でテンプレート一致を待つ
+              (mobile の wait_image 相当)
+- tap_image:  テンプレートが一致した位置をクリック
+              (region で検索範囲を絞れる、tap_offset_x/y でクリック位置をずらせる)
 - tap:        PicoMouse.click()（rx/ry = ウィンドウクライアント相対比率 0.0〜1.0）
 - swipe:      PicoMouse.press() + move_to() + release()
 - wait_fixed: time.sleep()
@@ -160,6 +163,70 @@ def run_pc_scene(
 
             ax, ay = rel_to_abs(hwnd, rx, ry)
             mouse.click(ax, ay, button, hold_ms=hold_ms)
+
+        elif t == "tap_image":
+            tmpl_path = p.get("template", p.get("path", ""))
+            threshold = float(p.get("threshold", 0.85))
+            timeout_s = float(p.get("timeout_s", 10.0))
+            button = str(p.get("button", "L")).upper()
+            hold_ms = int(p.get("duration_ms", 50))
+            region = p.get("region")   # [rx, ry, rw, rh] (0.0〜1.0) or None
+            off_x = int(p.get("tap_offset_x", 0))
+            off_y = int(p.get("tap_offset_y", 0))
+            log(f"  [{i+1}/{total}] tap_image {tmpl_path}  threshold={threshold}")
+
+            if not _check_hwnd(hwnd, log) or not _check_mouse(mouse, log):
+                continue
+
+            tmpl = cv2.imread(tmpl_path, cv2.IMREAD_COLOR)
+            if tmpl is None:
+                log(f"    エラー: テンプレート画像が読めません: {tmpl_path}")
+                return False
+
+            matched = False
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if should_stop():
+                    return False
+                if not win32gui.IsWindow(hwnd):
+                    time.sleep(0.5)
+                    continue
+                img = capture_window(hwnd)
+                if img is None:
+                    time.sleep(0.5)
+                    continue
+                ih, iw = img.shape[:2]
+                if region:
+                    rx, ry, rw, rh = region
+                    x0 = max(0, int(rx * iw))
+                    y0 = max(0, int(ry * ih))
+                    x1 = min(iw, int((rx + rw) * iw))
+                    y1 = min(ih, int((ry + rh) * ih))
+                    target = img[y0:y1, x0:x1]
+                else:
+                    x0 = y0 = 0
+                    target = img
+                if (target.shape[0] < tmpl.shape[0]
+                        or target.shape[1] < tmpl.shape[1]):
+                    time.sleep(0.5)
+                    continue
+                res = cv2.matchTemplate(target, tmpl, cv2.TM_CCOEFF_NORMED)
+                _, maxv, _, maxloc = cv2.minMaxLoc(res)
+                if maxv >= threshold:
+                    cx = x0 + maxloc[0] + tmpl.shape[1] // 2 + off_x
+                    cy = y0 + maxloc[1] + tmpl.shape[0] // 2 + off_y
+                    origin = win32gui.ClientToScreen(hwnd, (0, 0))
+                    ax = origin[0] + cx
+                    ay = origin[1] + cy
+                    log(f"    一致 score={maxv:.3f} click ({ax}, {ay})")
+                    mouse.click(ax, ay, button, hold_ms=hold_ms)
+                    matched = True
+                    break
+                time.sleep(0.5)
+
+            if not matched:
+                log(f"    タイムアウト: {tmpl_path}")
+                return False
 
         elif t == "swipe":
             rx1 = float(p.get("rx1", 0.5))
