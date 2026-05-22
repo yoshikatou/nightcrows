@@ -9,6 +9,7 @@ mobile 版との違い:
 from __future__ import annotations
 
 import os
+import statistics
 import threading
 import time
 from datetime import datetime as _dt
@@ -24,7 +25,10 @@ from .window_picker import find_hwnd_by_title
 
 EXP_METER_PATH = "exp_meter.json"
 DEFAULT_INTERVAL_SEC = 30            # 計測間隔の初期値（秒）
-CURRENT_WINDOW = 3                   # 現在速度: 直近Nサンプル
+CURRENT_WINDOW = 2                   # 現在速度の算出に必要な最低サンプル数
+CURRENT_DELTA_SAMPLES = 10           # 現在速度: 直近 N 個の隣接Δから中央値で算出
+MEDIAN_WINDOW = 5                    # 生値の平滑化: 直近Nサンプルの中央値を真値とみなす
+LVUP_DROP_THRESHOLD = 30.0           # 平滑化値がこの%以上下落したら LvUP とみなす
 OCR_TRIES = 3
 OCR_INTERVAL_S = 1.5
 LOG_DIR = "logs"
@@ -70,9 +74,8 @@ class ExpMeter(QObject):
         self.region_rel:    list[float] = []
         self.digit_hint:    int  = 1
         self.interval_sec:  int  = DEFAULT_INTERVAL_SEC
-        self.samples:       list[tuple[_dt, float]] = []
-        self.prev_raw:      float | None = None
-        self.accumulated:   float = 0.0
+        # 生値の系列（時刻, OCR読み取り値）。平滑化・累積・時速は毎回ここから導出する
+        self._raw_samples:  list[tuple[_dt, float]] = []
         self.start_time:    _dt | None   = None
         self.running:       bool = False
         self.last_ocr_detail: str = ""
@@ -112,13 +115,15 @@ class ExpMeter(QObject):
             else:
                 self.interval_sec = DEFAULT_INTERVAL_SEC
             self._timer.setInterval(self.interval_sec * 1000)
-            self.samples = [
-                (_dt.fromisoformat(ts), float(acc))
-                for ts, acc in d.get("samples", [])
-            ]
-            self.accumulated = float(d.get("accumulated", 0.0))
-            self.prev_raw    = (float(d["prev_raw"]) if d.get("prev_raw") is not None
-                                else None)
+            # 新形式: raw_samples（生値）。旧形式（accumulated/samples/prev_raw）は
+            # 生値を復元できないため破棄して新規スタート。
+            raw = d.get("raw_samples")
+            if raw is not None:
+                self._raw_samples = [
+                    (_dt.fromisoformat(ts), float(v)) for ts, v in raw
+                ]
+            else:
+                self._raw_samples = []
             st = d.get("start_time")
             self.start_time  = _dt.fromisoformat(st) if st else None
         except Exception:
@@ -133,9 +138,7 @@ class ExpMeter(QObject):
                     "region_rel":   self.region_rel,
                     "digit_hint":   self.digit_hint,
                     "interval_sec": self.interval_sec,
-                    "samples":      [[ts.isoformat(), acc] for ts, acc in self.samples],
-                    "accumulated":  self.accumulated,
-                    "prev_raw":     self.prev_raw,
+                    "raw_samples":  [[ts.isoformat(), v] for ts, v in self._raw_samples],
                     "start_time":   self.start_time.isoformat() if self.start_time else None,
                 }, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -174,9 +177,7 @@ class ExpMeter(QObject):
     def reset(self) -> None:
         was_running = self.running
         self.stop()
-        self.samples.clear()
-        self.prev_raw    = None
-        self.accumulated = 0.0
+        self._raw_samples.clear()
         self.start_time  = None
         self.save()
         self.updated.emit()
@@ -286,40 +287,33 @@ class ExpMeter(QObject):
             self._sample_failed.s.emit(str(e))
 
     def _on_sample_ready(self, raw: float) -> None:
+        """OCR成功時: 生値を _raw_samples に追加する。平滑化と累積は派生で計算。"""
         now = _dt.now()
         detail = self.last_ocr_detail
-        if self.prev_raw is None:
-            self.prev_raw    = raw
-            self.accumulated = 0.0
-            self.samples.append((now, 0.0))
-            self._log(f"初回取得  累積=0.0000%  {detail}")
+
+        # 追加前の派生値を退避してログ用に差分を出す
+        cs_before = self._cumulative_series()
+        prev_filtered = cs_before[-1][1] if cs_before else None
+        acc_before = self.accumulated  # this internally derives — cheap enough
+
+        self._raw_samples.append((now, raw))
+
+        # 追加後の最新平滑化値・累積
+        cs_after = self._cumulative_series()
+        latest_filtered = self._filtered_series()[-1][1]
+        acc_after = cs_after[-1][1] if cs_after else 0.0
+
+        if prev_filtered is None:
+            self._log(
+                f"初回取得  生値={raw:.4f}%  平滑化={latest_filtered:.4f}%  {detail}"
+            )
         else:
-            delta = raw - self.prev_raw
-            if delta < -30:
-                valid_delta = (100.0 - self.prev_raw) + raw
-                self.accumulated += valid_delta
-                self.prev_raw = raw
-                self.samples.append((now, self.accumulated))
-                self._log(
-                    f"LvUP検知  delta={delta:+.4f}%"
-                    f"  加算={valid_delta:.4f}%  累積={self.accumulated:.4f}%  {detail}"
-                )
-            elif delta < 0:
-                self._log(
-                    f"誤読スキップ  delta={delta:+.4f}%"
-                    f"  prev={self.prev_raw:.4f}%  {detail}"
-                )
-                self.status_changed.emit(
-                    f"⚠ 誤読スキップ ({raw:.2f}%)  最終: {now.strftime('%H:%M')}")
-                return
-            else:
-                self.accumulated += delta
-                self.prev_raw = raw
-                self.samples.append((now, self.accumulated))
-                self._log(
-                    f"取得  delta={delta:+.4f}%"
-                    f"  累積={self.accumulated:.4f}%  {detail}"
-                )
+            acc_delta = acc_after - acc_before
+            self._log(
+                f"取得  生値={raw:.4f}%  平滑化={latest_filtered:.4f}%"
+                f"  累積Δ={acc_delta:+.4f}%  累積={acc_after:.4f}%  {detail}"
+            )
+
         self.status_changed.emit(f"最終取得: {now.strftime('%H:%M')}")
         self.save()
         self.updated.emit()
@@ -328,20 +322,97 @@ class ExpMeter(QObject):
         self._log(f"エラー  {msg}")
         self.status_changed.emit(f"⚠ {msg}")
 
+    # ---------------------------------------------------------------- 派生計算
+    def _filtered_series(self) -> list[tuple[_dt, float]]:
+        """生値系列に対して直近 MEDIAN_WINDOW の中央値を取った平滑化系列。
+
+        各点 i における値は raw_samples[max(0, i-W+1) .. i] の中央値。
+        窓が埋まりきらない序盤は手持ちサンプルのみで中央値を取る（弱いフィルタ）。
+        """
+        out: list[tuple[_dt, float]] = []
+        rs = self._raw_samples
+        for i in range(len(rs)):
+            start = max(0, i - MEDIAN_WINDOW + 1)
+            window = [v for _, v in rs[start:i + 1]]
+            out.append((rs[i][0], statistics.median(window)))
+        return out
+
+    def _cumulative_series(self) -> list[tuple[_dt, float]]:
+        """平滑化系列の隣接差分を積み上げた累積系列。
+
+        - delta が LVUP_DROP_THRESHOLD を超えて負 → LvUP 扱いで `(100-prev)+curr` を加算
+        - delta が正 → そのまま加算
+        - delta が小さく負（フィルタ後の微揺らぎ等）→ 加算しない（据置）
+        """
+        fs = self._filtered_series()
+        if not fs:
+            return []
+        out: list[tuple[_dt, float]] = [(fs[0][0], 0.0)]
+        acc = 0.0
+        for i in range(1, len(fs)):
+            delta = fs[i][1] - fs[i - 1][1]
+            if delta < -LVUP_DROP_THRESHOLD:
+                acc += (100.0 - fs[i - 1][1]) + fs[i][1]
+            elif delta > 0:
+                acc += delta
+            out.append((fs[i][0], acc))
+        return out
+
+    # ---------------------------------------------------------------- 互換プロパティ
+    @property
+    def samples(self) -> list[tuple[_dt, float]]:
+        """累積系列。外部表示用（len/最終時刻参照を含む既存呼び出しを維持）。"""
+        return self._cumulative_series()
+
+    @property
+    def prev_raw(self) -> float | None:
+        """最新の平滑化値（生値ではなく中央値フィルタ後）。表示用。"""
+        fs = self._filtered_series()
+        return fs[-1][1] if fs else None
+
+    @property
+    def accumulated(self) -> float:
+        cs = self._cumulative_series()
+        return cs[-1][1] if cs else 0.0
+
     # ---------------------------------------------------------------- 表示計算
     def current_speed(self) -> float | None:
-        if len(self.samples) < CURRENT_WINDOW:
+        """直近の隣接Δレート（%/h換算）の中央値。
+
+        - LvUP境界は `(100-prev)+curr` に補正
+        - 微小マイナス（フィルタ残差ノイズ）は 0 として扱う
+        - サンプル間隔のばらつきに対しても dt で正規化済みなので頑健
+        """
+        fs = self._filtered_series()
+        if len(fs) < CURRENT_WINDOW:
             return None
-        return calc_speed(self.samples[-CURRENT_WINDOW:])
+        n_pairs = min(CURRENT_DELTA_SAMPLES, len(fs) - 1)
+        if n_pairs < 1:
+            return None
+        rates: list[float] = []
+        for i in range(len(fs) - n_pairs, len(fs)):
+            dt_s = (fs[i][0] - fs[i - 1][0]).total_seconds()
+            if dt_s <= 0:
+                continue
+            delta = fs[i][1] - fs[i - 1][1]
+            if delta < -LVUP_DROP_THRESHOLD:
+                delta = (100.0 - fs[i - 1][1]) + fs[i][1]
+            elif delta < 0:
+                delta = 0.0
+            rates.append(delta / dt_s * 3600)
+        if not rates:
+            return None
+        return statistics.median(rates)
 
     def avg_speed(self) -> float | None:
-        return calc_speed(self.samples)
+        return calc_speed(self._cumulative_series())
 
     def eta_to_levelup(self) -> tuple[float | None, float | None]:
         """(現在速度ベース分, 平均速度ベース分) — 不明は None。"""
-        if self.prev_raw is None:
+        latest = self.prev_raw
+        if latest is None:
             return None, None
-        remaining = 100.0 - self.prev_raw
+        remaining = 100.0 - latest
         cur = self.current_speed()
         avg = self.avg_speed()
         def _eta(spd: float | None) -> float | None:

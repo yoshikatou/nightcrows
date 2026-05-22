@@ -4,6 +4,53 @@
 
 ---
 
+## 2026-05-22
+
+### 経験値計測の OCR 誤読耐性を強化（`pc/gui/exp_meter.py`）
+
+**背景:** PC版経験値メーターのログを精査したところ、OCR 誤読 1 点が累積に大きく水増しされる事故が発生していた。例として 5-22 のログでは、誤読 `76.5880%` が混入した結果、累積が +37%（さらに直後の LvUP 誤検知連鎖で +57%）と、**1 回の誤読で累積が約 +94% 暴走**していた。
+
+**実装内容:**
+
+- 内部状態を `samples`/`prev_raw`/`accumulated` から **`_raw_samples`（生値のみ）** に変更し、平滑化値・累積・時速はすべて派生計算する設計に変更
+- `_filtered_series()` を追加: 直近 `MEDIAN_WINDOW=5` サンプルの **中央値フィルタ** で外れ値を除去
+- `_cumulative_series()` を追加: 平滑化系列の隣接Δを積み上げ、`LVUP_DROP_THRESHOLD=30%` 以上の落差で LvUP 判定
+- `current_speed()` を **直近 10 個の隣接Δレート（%/h 換算）の中央値** に変更（旧: 直近3サンプルの累積差）。LvUP境界補正・微小マイナス無視・サンプル間隔の dt 正規化込み
+- 外部 API は `prev_raw`/`samples`/`accumulated` を read-only property で互換維持し、`main.py`/`overlay.py` 側に変更なし
+- 永続化フォーマットを `raw_samples` のみに変更。旧形式（accumulated/samples/prev_raw）は生値復元不可のため起動時に破棄
+
+**検証結果（5-22 ログを再生）:**
+
+| 指標 | 旧アルゴリズム | 新アルゴリズム |
+|------|---------------|---------------|
+| 最終累積 | 100.29%（暴走） | 6.15%（妥当） |
+| current_speed 中央値 | 1.16 %/h | 1.16 %/h（変わらず） |
+| 標準偏差 | 283.6 %/h | **0.351 %/h** |
+| 最大値 | 3864 %/h | 2.99 %/h |
+| >10%/h の異常値 | 17 個 | **0 個** |
+
+中央値ベースは正しく、ブレが 800 倍改善された。
+
+### PC 用ツールフォルダ整理と README 整備
+
+- `pc/build_exe.bat` / `pc/run_exp_meter.py` / `pc/gui/` を `577704f` で追加していた範囲を確定
+- ルートに `run_pc.bat` を追加、`requirements.txt` に `pywin32>=308` を追加
+- `.gitignore` で `pc/build/`, `pc/dist/`, `pc/*.spec`, `pc/tools/`, `pc/settings.json`, `pc/exp_meter.json`, `pc/logs/` を除外
+
+### PC 自動入力の検証（`pc/tap_test.py` / `pc/click_test.py`）
+
+**背景:** モバイル版で機能している「スクショ→画像判定→タップ」フローを PC 版 Nightcrows でも実現したい。タップ送信部だけ Windows API に置き換える方針で検証した。
+
+**結果:** 詳細は `docs/pc_input.md` 参照。要点:
+
+- **`SendInput` 合成マウスクリック**: メモ帳等では動くが、**Nightcrows は無反応**。`LLMHF_INJECTED` を見たチート対策で弾かれている
+- **`InjectTouchInput` (Touch Injection API)**: TeamViewer 経由のリモートでは `ERROR_INVALID_PARAMETER (87)` で失敗。リモートセッション制限の可能性が濃厚で、ローカル実行ができないため未確定
+- **TeamViewer 経由の人手マウス操作**: 通る（専用ドライバが物理入力として注入するため）
+
+**結論:** 合成入力は弾かれる。残る選択肢は (a) Interception 等の署名ドライバ（規約違反/BAN リスクあり）、(b) ローカルで Touch Injection 再検証、(c) Arduino/HID 物理デバイス、(d) mobile/ の adb 版継続。
+
+---
+
 ## 2026-05-21
 
 ### 経験値計測パネルの追加（`gui/watcher_editor.py`）
