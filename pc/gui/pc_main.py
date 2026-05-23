@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter
@@ -49,6 +50,7 @@ from .pc_flow import (
     entry_scenes,
     load_pc_flow,
 )
+from .pc_flow_editor import FlowEditorWindow
 from .pc_scene import SCENES_DIR
 from .pc_scene_editor import SceneEditorWindow
 from .pc_watcher import WATCHERS_DIR, load_pc_watcher, save_pc_watcher
@@ -179,7 +181,26 @@ class PcFlowWindow(QWidget):
         self._lbl_run_status.setWordWrap(True)
         lay.addWidget(self._lbl_run_status)
 
-        lay.addWidget(QLabel("スケジュール:"))
+        # 曜日ページャー
+        day_row = QHBoxLayout()
+        self._btn_day_prev = QPushButton("◀")
+        self._btn_day_prev.setFixedWidth(32)
+        self._btn_day_prev.clicked.connect(self._show_prev_day)
+        self._btn_day_next = QPushButton("▶")
+        self._btn_day_next.setFixedWidth(32)
+        self._btn_day_next.clicked.connect(self._show_next_day)
+        self._btn_day_today = QPushButton("今日")
+        self._btn_day_today.setFixedWidth(48)
+        self._btn_day_today.clicked.connect(self._show_today)
+        self._lbl_day = QLabel()
+        self._lbl_day.setAlignment(Qt.AlignCenter)
+        self._lbl_day.setStyleSheet("font-weight:bold;")
+        day_row.addWidget(self._btn_day_prev)
+        day_row.addWidget(self._lbl_day, 1)
+        day_row.addWidget(self._btn_day_next)
+        day_row.addWidget(self._btn_day_today)
+        lay.addLayout(day_row)
+
         self._list_sched = QListWidget()
         self._list_sched.setStyleSheet("font-size:12px;")
         lay.addWidget(self._list_sched, 1)
@@ -188,6 +209,13 @@ class PcFlowWindow(QWidget):
         self._lbl_next_sched.setStyleSheet("color:#1565c0; font-size:12px;")
         self._lbl_next_sched.setWordWrap(True)
         lay.addWidget(self._lbl_next_sched)
+
+        btn_edit_flow = QPushButton("📅 フロー全体編集…")
+        btn_edit_flow.clicked.connect(self._open_flow_editor)
+        lay.addWidget(btn_edit_flow)
+
+        self._displayed_weekday = datetime.now().weekday()
+        self._update_day_label()
         return w
 
     # ---- テストタブ（カーソル移動 / クリック）
@@ -468,6 +496,38 @@ class PcFlowWindow(QWidget):
             self._scene_editors.remove(win)
         self._reload_scenes_list()
 
+    # ---- フロー編集（別ウィンドウ）
+    def _open_flow_editor(self) -> None:
+        # 現在選択中のフローを編集対象に
+        path: str | None = None
+        fname = self._combo_flow.currentData()
+        if fname:
+            candidate = os.path.join(FLOWS_DIR, fname)
+            if os.path.exists(candidate):
+                path = candidate
+        if not hasattr(self, "_flow_editors"):
+            self._flow_editors: list[FlowEditorWindow] = []
+        win = FlowEditorWindow(path)
+        win.saved.connect(self._on_flow_saved)
+        win.closed.connect(self._on_flow_editor_closed)
+        self._flow_editors.append(win)
+        win.show()
+
+    def _on_flow_saved(self, path: str) -> None:
+        # 一覧を更新し、もし選択中のフローが上書きされたら再ロード
+        self._load_flows_list()
+        cur = self._combo_flow.currentData()
+        if cur and os.path.basename(path) == cur:
+            try:
+                flow = self._runner.load_flow(os.path.join(FLOWS_DIR, cur))
+                self._update_schedule_list(flow.schedule)
+            except Exception as e:
+                self._append_log(f"フロー再ロード失敗: {e}")
+
+    def _on_flow_editor_closed(self, win) -> None:
+        if hasattr(self, "_flow_editors") and win in self._flow_editors:
+            self._flow_editors.remove(win)
+
     def _duplicate_scene(self) -> None:
         path = self._selected_scene_path()
         if not path or not os.path.exists(path):
@@ -694,10 +754,62 @@ class PcFlowWindow(QWidget):
             self._append_log(f"フロー読込エラー: {e}")
 
     def _update_schedule_list(self, schedule) -> None:
+        """フロー読込時のフック: 現在表示中の曜日でフィルタして表示する。"""
+        self._refresh_day_list()
+
+    # ---- 曜日ページャー
+    def _show_prev_day(self) -> None:
+        self._displayed_weekday = (self._displayed_weekday - 1) % 7
+        self._update_day_label()
+        self._refresh_day_list()
+
+    def _show_next_day(self) -> None:
+        self._displayed_weekday = (self._displayed_weekday + 1) % 7
+        self._update_day_label()
+        self._refresh_day_list()
+
+    def _show_today(self) -> None:
+        self._displayed_weekday = datetime.now().weekday()
+        self._update_day_label()
+        self._refresh_day_list()
+
+    def _update_day_label(self) -> None:
+        wd = self._displayed_weekday
+        today_wd = datetime.now().weekday()
+        offset = (wd - today_wd) % 7
+        name = DAY_NAMES[wd]
+        if offset == 0:
+            self._lbl_day.setText(f"今日 — {name}曜日")
+            self._lbl_day.setStyleSheet("font-weight:bold; color:#1565c0;")
+        else:
+            self._lbl_day.setText(f"{name}曜日（+{offset}日）")
+            self._lbl_day.setStyleSheet("font-weight:bold; color:#555;")
+
+    def _refresh_day_list(self) -> None:
+        """現在の `_displayed_weekday` に該当するエントリだけ並べる。"""
         self._list_sched.clear()
-        for entry in schedule:
+        flow = self._runner._flow
+        if not flow:
+            return
+        wd = self._displayed_weekday
+        matched: list = []
+        for entry in flow.schedule:
             if not entry.enabled:
                 continue
+            if entry.repeat == "daily":
+                matched.append(entry)
+            elif entry.repeat == "weekly":
+                if not entry.days or wd in entry.days:
+                    matched.append(entry)
+            elif entry.repeat == "once":
+                try:
+                    d = datetime.strptime(entry.date, "%Y-%m-%d").date()
+                    if d.weekday() == wd:
+                        matched.append(entry)
+                except (ValueError, TypeError):
+                    pass
+        matched.sort(key=lambda e: e.time)
+        for entry in matched:
             scenes = entry_scenes(entry)
             name = os.path.splitext(scenes[0])[0] if scenes else entry.target
             if entry.repeat == "weekly" and entry.days:
@@ -1066,6 +1178,16 @@ class PcFlowWindow(QWidget):
     def _refresh_status(self) -> None:
         title = self._settings.get("window_title", "")
         self._update_win_label(title)
+        # 日付跨ぎ検出: 表示中の曜日が "今日" のまま固定だった場合に追従させる
+        new_today_wd = datetime.now().weekday()
+        if getattr(self, "_last_today_wd", None) != new_today_wd:
+            prev = getattr(self, "_last_today_wd", None)
+            self._last_today_wd = new_today_wd
+            # 「今日」を表示していたなら新しい曜日に移動、それ以外はラベルだけ更新
+            if prev is not None and self._displayed_weekday == prev:
+                self._displayed_weekday = new_today_wd
+            self._update_day_label()
+            self._refresh_day_list()
 
     # ---------------------------------------------------------------- ログ
     def _append_log(self, msg: str) -> None:

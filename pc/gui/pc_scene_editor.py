@@ -144,7 +144,7 @@ class SceneEditorWindow(QWidget):
         btn_capture.setToolTip("対象ウィンドウからスクショを撮って snapshot ステップを追加")
         btn_capture.clicked.connect(self._capture_snapshot)
         rlay.addWidget(btn_capture)
-        btn_wait = QPushButton("wait_fixed 追加")
+        btn_wait = QPushButton("待機 追加")
         btn_wait.clicked.connect(self._add_wait_fixed)
         rlay.addWidget(btn_wait)
         btn_more = QPushButton("+ その他のステップ ▾")
@@ -205,7 +205,7 @@ class SceneEditorWindow(QWidget):
         rlay.addWidget(self._run_log)
 
         hint = QLabel(
-            "操作: クリック=tap / ドラッグ=領域→メニュー / "
+            "操作: クリック=タップ追加 / ドラッグ=領域選択→メニュー / "
             "右クリック保持+ホイール=拡大縮小・右ドラッグ=パン"
         )
         hint.setStyleSheet("color:#666; font-size:11px;")
@@ -269,13 +269,13 @@ class SceneEditorWindow(QWidget):
             return
 
         menu = QMenu(self)
-        act_wait   = menu.addAction("wait_image (この画像が出るまで待つ)")
-        act_tap    = menu.addAction("tap_image  (この画像を見つけてタップ)")
+        act_wait   = menu.addAction("画像出現待ち  (この画像が出るまで待つ)")
+        act_tap    = menu.addAction("画像をタップ  (この画像を見つけてタップ)")
         menu.addSeparator()
-        act_swipe  = menu.addAction("swipe (左上 → 右下)")
-        act_scroll = menu.addAction("scroll (ジッター付き swipe)")
+        act_swipe  = menu.addAction("スワイプ      (左上 → 右下)")
+        act_scroll = menu.addAction("スクロール    (ジッター付きスワイプ)")
         menu.addSeparator()
-        act_if     = menu.addAction("if_image (画像有無で分岐)")
+        act_if     = menu.addAction("画像で分岐    (画像有無で then / else)")
         action = menu.exec(QCursor.pos())
         if action is None:
             return
@@ -345,7 +345,7 @@ class SceneEditorWindow(QWidget):
 
     def _add_wait_fixed(self) -> None:
         v, ok = QInputDialog.getDouble(
-            self, "wait_fixed", "待機秒数:", 1.0, 0.1, 600.0, 1,
+            self, "待機", "待機秒数:", 1.0, 0.1, 600.0, 1,
         )
         if not ok:
             return
@@ -361,10 +361,10 @@ class SceneEditorWindow(QWidget):
 
     def _show_add_step_menu(self) -> None:
         menu = QMenu(self)
-        menu.addAction("call_scene 追加",    self._add_call_scene)
-        menu.addAction("pick_scene 追加",    self._add_pick_scene)
-        menu.addAction("keyevent 追加",      self._add_keyevent)
-        menu.addAction("group_header 追加",  self._add_group_header)
+        menu.addAction("シーン呼び出し 追加", self._add_call_scene)
+        menu.addAction("シーン抽選 追加",     self._add_pick_scene)
+        menu.addAction("キー入力 追加",       self._add_keyevent)
+        menu.addAction("見出し 追加",         self._add_group_header)
         menu.exec(QCursor.pos())
 
     def _add_call_scene(self) -> None:
@@ -373,7 +373,7 @@ class SceneEditorWindow(QWidget):
             QMessageBox.information(self, "シーン一覧", "scenes/ にシーンがありません")
             return
         item, ok = QInputDialog.getItem(
-            self, "call_scene", "呼び出すシーン:", scenes, 0, False,
+            self, "シーン呼び出し", "呼び出すシーン:", scenes, 0, False,
         )
         if not ok:
             return
@@ -387,7 +387,7 @@ class SceneEditorWindow(QWidget):
             QMessageBox.information(self, "シーン一覧", "scenes/ にシーンがありません")
             return
         text, ok = QInputDialog.getMultiLineText(
-            self, "pick_scene",
+            self, "シーン抽選",
             "1 行 1 シーン名（既存シーン名で空行は無視）:",
             "\n".join(scenes[:2]),
         )
@@ -396,12 +396,14 @@ class SceneEditorWindow(QWidget):
         chosen = [s.strip() for s in text.splitlines() if s.strip()]
         if not chosen:
             return
-        mode, ok = QInputDialog.getItem(
-            self, "pick_scene", "選択モード:",
-            ["random", "sequential"], 0, False,
+        mode_choices = {"ランダム": "random", "順番": "sequential"}
+        label, ok = QInputDialog.getItem(
+            self, "シーン抽選", "選択モード:",
+            list(mode_choices.keys()), 0, False,
         )
         if not ok:
             return
+        mode = mode_choices[label]
         self._scene.steps.append(PcStep(
             type="pick_scene",
             params={"mode": mode, "scenes": chosen},
@@ -411,7 +413,7 @@ class SceneEditorWindow(QWidget):
 
     def _add_keyevent(self) -> None:
         key, ok = QInputDialog.getText(
-            self, "keyevent",
+            self, "キー入力",
             "キー名 (例: esc, enter, f5, a, space):",
         )
         if not ok or not key.strip():
@@ -425,7 +427,7 @@ class SceneEditorWindow(QWidget):
 
     def _add_group_header(self) -> None:
         label, ok = QInputDialog.getText(
-            self, "group_header", "見出し文字列:",
+            self, "見出し", "見出し文字列:",
         )
         if not ok:
             return
@@ -462,12 +464,12 @@ class SceneEditorWindow(QWidget):
 
         scenes = self._list_scenes()
         if not scenes:
-            QMessageBox.information(self, "if_image", "scenes/ にシーンが無いため空で追加します")
+            QMessageBox.information(self, "画像で分岐", "scenes/ にシーンが無いため空で追加します")
             then_name = ""
             else_name = ""
         else:
             then_name, ok = QInputDialog.getItem(
-                self, "if_image", "then (画像あり)→ 実行シーン:",
+                self, "画像で分岐", "成立（画像あり）→ 実行シーン:",
                 ["(なし)"] + scenes, 0, False,
             )
             if not ok:
@@ -475,7 +477,7 @@ class SceneEditorWindow(QWidget):
             elif then_name == "(なし)":
                 then_name = ""
             else_name, ok = QInputDialog.getItem(
-                self, "if_image", "else (画像なし)→ 実行シーン:",
+                self, "画像で分岐", "不成立（画像なし）→ 実行シーン:",
                 ["(なし)"] + scenes, 0, False,
             )
             if not ok:
@@ -509,43 +511,47 @@ class SceneEditorWindow(QWidget):
     def _step_label(self, i: int, s: PcStep) -> str:
         p = s.params
         if s.type == "wait_fixed":
-            return f"{i+1:02d}. ⏳ wait_fixed {p.get('seconds', 0)}s"
+            return f"{i+1:02d}. ⏳ 待機  {p.get('seconds', 0)} 秒"
         if s.type == "snapshot":
             name = os.path.basename(str(p.get("path", "")))
-            return f"{i+1:02d}. 📸 snapshot {name}  thr={p.get('threshold', 0.85)}"
+            return (
+                f"{i+1:02d}. 📸 画像出現待ち  {name}  "
+                f"閾値={p.get('threshold', 0.85)}"
+            )
         if s.type == "tap":
             return (
-                f"{i+1:02d}. 👆 tap "
+                f"{i+1:02d}. 👆 タップ  "
                 f"({p.get('rx', 0):.3f}, {p.get('ry', 0):.3f})"
             )
         if s.type == "tap_image":
             name = os.path.basename(str(p.get("template", "")))
-            return f"{i+1:02d}. 🎯 tap_image {name}"
+            return f"{i+1:02d}. 🎯 画像をタップ  {name}"
         if s.type == "swipe":
             return (
-                f"{i+1:02d}. ↔ swipe "
+                f"{i+1:02d}. ↔ スワイプ  "
                 f"({p.get('rx1', 0):.3f},{p.get('ry1', 0):.3f}) → "
                 f"({p.get('rx2', 0):.3f},{p.get('ry2', 0):.3f})"
             )
         if s.type == "scroll":
             return (
-                f"{i+1:02d}. 🌀 scroll "
+                f"{i+1:02d}. 🌀 スクロール（ジッター付き）  "
                 f"({p.get('rx1', 0):.3f},{p.get('ry1', 0):.3f}) → "
-                f"({p.get('rx2', 0):.3f},{p.get('ry2', 0):.3f})  (ジッター)"
+                f"({p.get('rx2', 0):.3f},{p.get('ry2', 0):.3f})"
             )
         if s.type == "call_scene":
-            return f"{i+1:02d}. 📞 call_scene → {p.get('scene', '')}"
+            return f"{i+1:02d}. 📞 シーン呼び出し → {p.get('scene', '')}"
         if s.type == "if_image":
             name = os.path.basename(str(p.get("template", "")))
             return (
-                f"{i+1:02d}. ❓ if_image {name}  then={p.get('then_scene', '')}  "
-                f"else={p.get('else_scene', '')}"
+                f"{i+1:02d}. ❓ 画像で分岐  {name}  "
+                f"成立→{p.get('then_scene', '')}  不成立→{p.get('else_scene', '')}"
             )
         if s.type == "pick_scene":
             scenes = p.get("scenes", []) or []
-            return f"{i+1:02d}. 🎲 pick_scene[{p.get('mode', 'random')}] ({len(scenes)} 件)"
+            mode_jp = "ランダム" if p.get("mode", "random") == "random" else "順番"
+            return f"{i+1:02d}. 🎲 シーン抽選[{mode_jp}]  ({len(scenes)} 件)"
         if s.type == "keyevent":
-            return f"{i+1:02d}. ⌨ keyevent {p.get('key', '')!r}"
+            return f"{i+1:02d}. ⌨ キー入力  {p.get('key', '')!r}"
         if s.type == "group_header":
             return f"━━ {p.get('label', '')} ━━"
         return f"{i+1:02d}. {s.type}"
