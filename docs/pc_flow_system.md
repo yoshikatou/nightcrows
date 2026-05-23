@@ -1,521 +1,347 @@
-# PC フロー制御システム 設計書
+# PC システム設計書
 
-作成: 2026-05-22  
-更新: 2026-05-22  
-ステータス: **実装完了（シーン JSON 作成待ち）**
+作成: 2026-05-22
+更新: 2026-05-23（ウォッチャー・編集ウィンドウ群・週間スケジュール表示まで反映）
+ステータス: **稼働中（シーン作成・運用フェーズ）**
+
+> 旧版（実装初期）は履歴として `docs/pc_flow_design.md` に残してある。本書は現在の実装を反映した上位ドキュメント。
 
 ---
 
 ## 1. 概要
 
-Night Crows PC 版の定期操作（BF3・BR・クエスト等）を時刻スケジュールで自動実行するシステム。
+Night Crows PC 版を Win32 キャプチャ + Pico HID マウス + テンプレマッチで自動操作するシステム。
 
 | 項目 | 内容 |
 |------|------|
-| 入力手段 | Raspberry Pi Pico USB HID マウス（`PicoMouse`） |
-| 画面認識 | Win32 PrintWindow キャプチャ + OpenCV テンプレートマッチング |
-| 操作定義 | JSON ファイル（シーン・フロー） |
-| UI | PySide6 デスクトップ GUI |
-| 起動 | `python pc/run_pc_flow.py` |
+| 入力 | Raspberry Pi Pico USB HID マウス（`PicoMouse`）+ Win32 `keybd_event`（キー入力のみ） |
+| キャプチャ | Win32 `PrintWindow`（`capture_window`） |
+| 画像認識 | OpenCV `cv2.matchTemplate(TM_CCOEFF_NORMED)` |
+| OCR | Tesseract + `pytesseract`（複数 PSM 試行で精度向上） |
+| 操作定義 | JSON（シーン / フロー / ウォッチャー） |
+| UI | PySide6（メイン + 編集サブウィンドウ群） |
+| 起動 | `run_pc_flow.bat` または `python pc/run_pc_flow.py` |
 
 ---
 
 ## 2. ファイル構成
 
 ```
-D:/github2/nightcrows/
-├── pc/
-│   ├── run_pc_flow.py          # エントリーポイント
-│   ├── pico_mouse.py           # Pico HID マウスコントローラ（既存）
-│   ├── scenes/                 # PC シーン JSON（要作成）
-│   │   └── BF3_92LV.json
-│   ├── flows/                  # PC フロー JSON
-│   │   └── 基本_pc.json
-│   └── gui/
-│       ├── pc_scene.py         # シーン実行エンジン       ← 今回追加
-│       ├── pc_flow.py          # スケジューラー           ← 今回追加
-│       ├── pc_main.py          # メインウィンドウ         ← 今回追加
-│       │    ── 既存（変更なし） ──
-│       ├── capture.py          # Win32 キャプチャ
-│       ├── exp_meter.py        # 経験値計測コア
-│       ├── window_picker.py    # ウィンドウ選択ダイアログ
-│       ├── settings.py         # settings.json 読み書き
-│       ├── main.py             # 経験値メーター単体（コンパクト版）
-│       └── overlay.py          # オーバーレイウィンドウ
-└── docs/
-    ├── pc_flow_design.md       # 当初設計書（構想フェーズ）
-    └── pc_flow_system.md       # 本設計書（実装後）
+pc/
+├── run_pc_flow.py          # エントリーポイント（CWD を pc/ に固定）
+├── pico_mouse.py           # Pico HID マウスコントローラ
+├── scenes/                 # シーン JSON
+├── flows/                  # フロー JSON
+├── watchers/               # ウォッチャー JSON
+├── snapshots/              # スクショ保存（.gitignore）
+├── templates/<scene>/      # シーン用テンプレ画像
+├── watcher_templates/      # ウォッチャー用テンプレ画像
+├── logs/                   # 日次ログ（YYYY-MM-DD.log）
+├── debug/                  # OCR 入力画像など一時保存（.gitignore）
+└── gui/
+    ├── pc_main.py          # メインウィンドウ（縦長 1/4）
+    ├── pc_scene.py         # シーン実行エンジン
+    ├── pc_scene_editor.py  # シーン編集ウィンドウ（独立、大きめ）
+    ├── pc_canvas.py        # スナップショット表示キャンバス（ズーム/パン対応）
+    ├── pc_watcher.py       # ウォッチャーモデル + 評価
+    ├── pc_watcher_editor.py # ウォッチャー編集ウィンドウ（独立）
+    ├── pc_flow.py          # フロースケジューラー + ウォッチャー統合
+    ├── pc_flow_editor.py   # フロー編集ウィンドウ（週間スケジュール）
+    ├── logger.py           # 共通ログ（write_log / purge_old_logs）
+    ├── capture.py          # Win32 キャプチャ
+    ├── exp_meter.py        # 経験値計測コア（中央値フィルタ等）
+    ├── ocr.py              # 前処理 + ocr_digits_best（複数バリアント）
+    ├── window_picker.py    # ウィンドウ選択ダイアログ
+    ├── region_picker.py    # 経験値メーター用領域ピッカー
+    ├── tesseract.py        # Tesseract 検出・パス適用
+    ├── settings.py         # settings.json 読み書き
+    ├── main.py             # 経験値メーター単体 GUI
+    └── overlay.py          # 経験値オーバーレイ
 ```
 
 ---
 
-## 3. アーキテクチャ
+## 3. メインウィンドウ（縦長 1/4 想定: 約 480×1080）
 
-### 3.1 レイヤー構成
-
-```
-┌──────────────────────────────────────────────┐
-│  pc_main.py  PcFlowWindow (PySide6 GUI)      │  プレゼンテーション層
-│  ・ウィンドウ選択   ・Pico 接続              │
-│  ・フロー開始/停止  ・経験値メーター表示      │
-└──────────────────────────────────────────────┘
-          ↕ Qt Signal/Slot
-┌──────────────────────────────────────────────┐
-│  pc_flow.py  PcFlowRunner (QObject)          │  スケジューリング層
-│  ・時刻スケジュール評価                       │
-│  ・シーンシーケンス実行                       │
-│  ・スレッド管理                               │
-└──────────────────────────────────────────────┘
-          ↓ 呼び出し
-┌──────────────────────────────────────────────┐
-│  pc_scene.py  run_pc_scene()                 │  シーン実行層
-│  ・ステップ解釈・実行                         │
-│  ・座標変換（相対比率 → 絶対 px）             │
-└──────────────────────────────────────────────┘
-          ↓ 使用
-┌────────────────────┐  ┌───────────────────────┐
-│  pico_mouse.py     │  │  capture.py / cv2     │
-│  PicoMouse         │  │  Win32 キャプチャ     │
-│  HID クリック/移動 │  │  テンプレートマッチ   │
-└────────────────────┘  └───────────────────────┘
-```
-
-### 3.2 スレッドモデル
+Windows 11 のスナップで画面 1/4 に収まる縦長レイアウト。常設ヘッダー + タブ。
 
 ```
-メインスレッド (Qt GUI)
-  ├── PcFlowWindow  ─── QTimer (1秒) ─→ _refresh_status()
-  └── PcFlowRunner
-        └── バックグラウンドスレッド (daemon=True)
-              ├── check_schedule() をポーリング
-              └── _run_scene() → run_pc_scene() → PicoMouse 操作
-                  ※ Qt シグナルは emit() でメインスレッドへ安全に伝達
+┌─ ヘッダー ──────────────────┐
+│  ゲームウィンドウ選択       │
+│  Pico マウス接続            │
+├─ タブ ─────────────────────┤
+│ [実行][テスト][見張り][作成][ログ]
+└────────────────────────────┘
 ```
+
+| タブ | 内容 |
+|------|------|
+| 実行 | フロー選択・開始/停止・**曜日ページャー (◀ ▶ 今日)** で当日該当エントリのみ表示・次回予定・📅 フロー全体編集ボタン |
+| テスト | 移動モード（滑らか / ジャンプ）・速度スライダー・座標 X/Y・現在位置/クリック取得（オーバーレイで複数件）・HID移動/キャリブ・左右クリック・ドラッグ・実行ログ |
+| 見張り | ウォッチャー一覧（チェックで即トグル）・新規/編集/削除 |
+| 作成 | シーン一覧・新規/編集/複製/削除 |
+| ログ | フロー実行・スクショ取得・Tesseract 状態などの集約ログ表示 |
+
+「実行」タブと「フロー編集ウィンドウ」は **1 秒ごとの QTimer** で日付跨ぎを検知。「今日」表示が固定されないよう自動追従。
 
 ---
 
-## 4. コンポーネント詳細
+## 4. 編集ウィンドウ群（独立した広めの画面）
 
-### 4.1 pc_scene.py — シーン実行エンジン
+メイン縦長ウィンドウとは別に開く。複数同時起動可。
 
-#### データモデル
+### 4.1 シーン編集 `pc_scene_editor.py` (≈ 1000×800)
+
+- 上部: シーン名・対象ウィンドウ・保存
+- 左: `PcSnapshotCanvas`（スクショ + マーカー + ズーム/パン）
+- 右: 操作ボタン群・速度設定・タップ後待機チェック・ステップ一覧・選択行/再生実行・実行ログ
+- 操作:
+  - スクショ取得 → `snapshots/snap_*.png` + snapshot ステップ追加
+  - キャンバス**クリック** → タップ追加（オプションで待機セット）
+  - キャンバス**ドラッグ** → メニュー（画像出現待ち / 画像をタップ / スワイプ / スクロール / 画像で分岐）
+  - 「+ その他のステップ ▾」: シーン呼び出し / シーン抽選 / キー入力 / 見出し
+  - 「待機 追加」ボタン
+- 表示は日本語化済み（JSON 内部は英語タイプ名のまま）
+- 保存 / 閉じる時はシグナル `saved` / `closed` を emit してメインの一覧と即同期
+
+### 4.2 ウォッチャー編集 `pc_watcher_editor.py` (≈ 1000×800)
+
+- 上部: タイトル・対象ウィンドウ・保存
+- 左: キャンバス（スクショ表示、ドラッグで領域選択）
+- 右:
+  - スクショ取得
+  - 検知タイプ（image_appear / image_gone / ocr_number）
+  - 閾値 or OCR 設定（文字種・演算子・値・連続回数）
+  - ハンドラーシーン選択（scenes/ から）
+  - 完了後動作（noop / restart_scene / next_scene / stop）
+  - 優先度 / 冷却 / ポーリング min〜max / 有効 / 通知
+- 単発テスト（現在のスクショで判定）・連続監視テスト（バックグラウンド）
+- OCR テスト時は `debug/ocr_*.png` に入力画像を保存
+
+### 4.3 フロー編集 `pc_flow_editor.py` (≈ 1100×800)
+
+- 上部: フロー名・保存
+- 中央: **7 曜日 × 48 時刻スロット (30 分刻み)** の QTableWidget
+  - daily = 青文字（全曜日）/ weekly = 緑文字（days[] のみ）/ once = オレンジ文字（date の曜日）
+  - 無効エントリは灰色
+  - **今日の曜日列は薄黄背景 + ヘッダー太字**
+  - **現在時刻に水平赤線**（1 秒ごとに移動、分秒の小数 row で滑らかに）
+- セルダブルクリック → 新規 / 編集ダイアログ
+- 編集ダイアログ: 時刻 / シーン選択 / 繰り返し radio (毎日 / 週次 / 1回限り) / 曜日チェック / 日付 / 有効
+- 「+ 新規エントリ」「選択を編集」「選択を削除」
+- 1 秒ごとに viewport 更新 + 日付跨ぎ検出で曜日着色を全更新
+
+---
+
+## 5. データモデル
+
+### 5.1 シーン (`pc_scene.PcScene`)
 
 ```python
-@dataclass
-class PcStep:
-    type: str           # "tap" | "swipe" | "snapshot" | "wait_fixed"
-    params: dict        # ステップ固有パラメータ
-
 @dataclass
 class PcScene:
-    name: str           # 表示名
-    window_title: str   # 対象ゲームウィンドウのタイトル（部分一致）
+    name: str
+    window_title: str
     steps: list[PcStep]
+
+@dataclass
+class PcStep:
+    type: str
+    params: dict
 ```
 
-#### 主要関数
+JSON 保存: `pc/scenes/<name>.json`
 
-| 関数 | 説明 |
-|------|------|
-| `load_pc_scene(path)` | JSON ファイルから PcScene を読み込む |
-| `save_pc_scene(scene, path)` | PcScene を JSON ファイルに保存 |
-| `rel_to_abs(hwnd, rx, ry)` | ウィンドウ相対比率 → 絶対スクリーン座標 |
-| `run_pc_scene(scene, mouse, hwnd, log, should_stop, step_callback)` | シーン全体を実行。成功→True、中断/失敗→False |
+### 5.2 ステップタイプ一覧（実装済み 11 種）
 
-#### ステップ実行詳細
+| type | 表示名 | 主要パラメータ |
+|------|--------|-----------------|
+| `wait_fixed` | 待機 | `seconds` |
+| `snapshot` | 画像出現待ち | `path` (PNG) / `threshold` / `timeout_s` |
+| `tap` | タップ | `rx, ry` (0.0〜1.0) / `button` / `duration_ms` |
+| `tap_image` | 画像をタップ | `template` / `threshold` / `timeout_s` / `region` / `tap_offset_x/y` |
+| `swipe` | スワイプ | `rx1, ry1, rx2, ry2` / `duration_ms` |
+| `scroll` | スクロール | swipe + `*_jitter` / `duration_jitter_ms` |
+| `keyevent` | キー入力 | `key` (esc/enter/f1-f12/a-z 等) / `duration_ms` |
+| `group_header` | 見出し | `label` （実行は no-op） |
+| `call_scene` | シーン呼び出し | `scene` |
+| `if_image` | 画像で分岐 | `template` / `threshold` / `region` / `then_scene` / `else_scene` |
+| `pick_scene` | シーン抽選 | `mode` (random/sequential) / `scenes` |
 
-**`snapshot`** — ゲーム画面が期待状態になるまで待機
+**循環参照ガード:** call_scene / if_image / pick_scene のサブ呼び出しは `_MAX_CALL_DEPTH=10` と `_call_stack` で循環を防ぐ。
 
-```
-capture_window(hwnd)
-  → cv2.matchTemplate(img, tmpl, TM_CCOEFF_NORMED)
-  → score >= threshold なら通過
-  → deadline 超過でシーン失敗 (return False)
-  ポーリング間隔: 0.5 秒
-```
-
-**`tap`** — 指定座標をクリック
-
-```
-(rx, ry) → rel_to_abs(hwnd, rx, ry) → (abs_x, abs_y)
-PicoMouse.click(abs_x, abs_y, button, hold_ms)
-  ※ SetCursorPos でカーソル移動 + Pico HID でボタン押下
-```
-
-**`swipe`** — ドラッグ操作
-
-```
-(rx1,ry1) → abs (x1,y1)
-(rx2,ry2) → abs (x2,y2)
-
-dist = max(|x2-x1|, |y2-y1|)
-n_steps  = max(5, dist // 15)
-step_delay = duration_ms / 1000 / n_steps
-max_step = dist // n_steps + 1
-
-PicoMouse.move_cursor(x1, y1)   # SetCursorPos で開始点へ
-PicoMouse.press("L")
-PicoMouse.move_to(x2, y2, max_step, delay=step_delay)  # HID イーズアウト
-PicoMouse.release()
-```
-
-**`wait_fixed`** — 固定時間待機（0.05 秒刻みで停止確認）
-
-#### 座標変換式
+### 5.3 ウォッチャー (`pc_watcher.PcWatcher`)
 
 ```python
-rect   = win32gui.GetClientRect(hwnd)    # → (0, 0, width, height)
-origin = win32gui.ClientToScreen(hwnd, (0, 0))
-abs_x  = origin[0] + rx * rect[2]
-abs_y  = origin[1] + ry * rect[3]
+@dataclass
+class WatcherCondition:
+    type: str                    # image_appear / image_gone / ocr_number
+    template: str                # 画像系
+    region: list[float] | None   # [rx, ry, rw, rh]
+    threshold: float
+    ocr_whitelist: str           # OCR
+    op: str                      # <, <=, ==, !=, >=, >
+    value: float
+    consecutive: int             # N 回連続ヒット → 発火
+
+@dataclass
+class PcWatcher:
+    id: str  (8桁 UUID)
+    title: str
+    enabled: bool
+    priority: int
+    condition: WatcherCondition
+    handler: str                 # scenes/ 相対
+    after: str                   # noop / restart_scene / next_scene / stop
+    cooldown_s: float
+    alert_desktop: bool
+    poll_min_s: float
+    poll_max_s: float
 ```
 
-ゲームウィンドウのサイズ変更・移動に毎回追従する。
+JSON 保存: `pc/watchers/<title>_<id>.json`
+テンプレ保存: `pc/watcher_templates/<id>.png`
 
----
-
-### 4.2 pc_flow.py — スケジューラー
-
-#### データモデル
+### 5.4 フロー (`pc_flow.PcFlow`)
 
 ```python
 @dataclass
 class ScheduleEntry:
-    time: str           # "HH:MM"
-    target: str         # 実行シーンファイル名（sequence 空のとき使用）
-    sequence: list[str] # 順番に実行するシーンファイル名リスト
-    repeat: str         # "daily" | "weekly" | "once"
-    days: list[int]     # 0=月〜6=日（repeat="weekly" のとき使用）
-    date: str           # "YYYY-MM-DD"（repeat="once" のとき使用）
-    enabled: bool       # False にするとスキップ
-
-@dataclass
-class FlowSettings:
-    polling_interval_s: float  # スケジュール確認間隔（秒）
+    time: str              # "HH:MM"
+    target: str            # シーン名 (scenes/ 相対)
+    sequence: list[str]    # 追加シーン列（target に続けて実行）
+    repeat: str            # daily / weekly / once
+    days: list[int]        # 0=月..6=日 (weekly)
+    date: str              # YYYY-MM-DD (once)
+    enabled: bool
 
 @dataclass
 class PcFlow:
     name: str
     version: int
     schedule: list[ScheduleEntry]
-    settings: FlowSettings
+    settings: FlowSettings   # polling_interval_s
 ```
 
-#### 主要関数
+JSON 保存: `pc/flows/<name>.json`
 
-| 関数 | 説明 |
+---
+
+## 6. フロー実行ループ
+
+```
+PcFlowRunner._run()
+├─ 起動時:
+│  ・watchers/ から有効なものを読み込み
+│  ・別スレッドで watcher_loop を開始
+│  ・起動時刻より前の本日エントリは last_fired に登録（重複防止）
+│
+├─ メインループ (poll = settings.polling_interval_s, 既定 1.0s):
+│  ├─ 1) 発火キュー処理（優先度降順）
+│  │   ・handler を実行 (watcher_paused.set 中)
+│  │   ・after: stop=フロー停止 / restart_scene=シーン再開 /
+│  │             next_scene=次へ / noop=何もしない
+│  ├─ 2) スケジュール発火確認
+│  │   ・check_schedule() → ScheduleEntry
+│  │   ・entry_scenes() で target + sequence を解決
+│  │   ・_run_scenes_with_watcher() で順次実行（割込対応）
+│  └─ 3) 0.1s 単位の待機
+│
+└─ 終了:
+   ・watcher_loop 停止
+   ・state_changed("idle")
+```
+
+### 6.1 ウォッチャーポーリング (`PcFlowRunner._watcher_loop`)
+
+別スレッドで動き、`poll_min_s`〜`poll_max_s` のランダム間隔で全 watcher を評価。
+
+```
+while not _watcher_stop:
+    if _watcher_paused: sleep & continue
+    img = capture_window(hwnd)
+    for w in watchers:
+        if cooldown 中: skip
+        r = evaluate_watcher(img, w)
+        if r.fired:
+            _hit_counts[w.id] += 1
+            if _hit_counts[w.id] >= w.condition.consecutive:
+                _fired_queue.append((w, info))
+                _watcher_pending.set()
+        else:
+            _hit_counts[w.id] = 0
+    sleep(random.uniform(pmin, pmax))
+```
+
+### 6.2 シーン中断 → 復帰
+
+`run_pc_scene` の `should_stop` は `_stop_event` OR `_watcher_pending` で判定。ウォッチャー発火で True を返してシーンを抜け、メインループが発火キューを処理して `after` に応じて復帰する。
+
+---
+
+## 7. 座標系の運用方針
+
+すべて **ウィンドウクライアント領域の相対比率 (0.0〜1.0)** で保存。実行時に `win32gui.GetClientRect` で現在サイズを取得して絶対座標に変換するため、**ウィンドウ位置移動には完全追従**する。
+
+ただし `cv2.matchTemplate` は固定サイズ画像での比較なので、**ウィンドウサイズ（解像度）が変わるとテンプレマッチが動かなくなる**。
+
+**運用方針:**
+- シーン作成時と実行時で Nightcrows ウィンドウのサイズを揃える（A 運用）
+- 必要になったら撮影時サイズを JSON に記録してリサイズマッチを実装する（B 案・未着手）
+
+---
+
+## 8. ログとローテーション
+
+`pc/gui/logger.py` の `write_log()` で全コンポーネントが `logs/YYYY-MM-DD.log` に追記する。
+
+| 書き出し元 | 内容 |
+|---|---|
+| `ExpMeter._log` | 経験値計測の取得・LvUP 等 |
+| `PcFlowRunner._log` | フロー開始/停止、スケジュール発火、シーン実行、🔥 ウォッチャー発火、ハンドラー実行、after 動作 |
+| `WatcherEditorWindow._append_log` | テスト中の **発火イベント** のみ（評価ごとの行は画面のみ） |
+
+起動時に `purge_old_logs(retain_days=30)` で 30 日より古い `.log` を削除（`settings.log_retain_days` で変更可）。
+
+---
+
+## 9. 入力レイヤー（Pico HID マウス + Win32 キー）
+
+### 9.1 マウス
+
+`PicoMouse`（`pc/pico_mouse.py`）。詳細は `docs/pc_pico_mouse.md` 参照。
+
+PC GUI 側で確定した運用ルール（`docs/pc_pico_mouse.md` に同内容）:
+
+- **クリックはジャンプ**（`SetCursorPos` で位置設定 → Pico HID クリック）
+- **ドラッグの開始位置移動はジャンプ可**（運用画面のリモートツールと同じ挙動）
+- **ドラッグ本体は必ず滑らか HID 相対移動** (固定 160 px/s + イーズアウト)。`SetCursorPos` だと Raw Input にマウス移動イベントが届かず、ゲームが drag として認識しないため
+- 開始位置到達後に **一呼吸 (200ms)** 挟んで `press("L")` → `release("L")`
+
+### 9.2 キーボード
+
+`keyevent` ステップで `ctypes.windll.user32.keybd_event` を呼ぶ Win32 ベース。
+キー名→VK コードの対応は `_KEY_VK_MAP` に定義（esc / enter / tab / space / 矢印 / f1-f12 / 単文字）。
+
+> Pico に keyboard 拡張を載せれば物理 HID キー入力にできるが現状未実装。チート対策で SendInput キー入力が弾かれる場合は将来検討。
+
+---
+
+## 10. 既知の制約・運用上の注意
+
+| 項目 | 制約 |
 |------|------|
-| `load_pc_flow(path)` | JSON から PcFlow を読み込む |
-| `save_pc_flow(flow, path)` | PcFlow を JSON に保存 |
-| `entry_scenes(entry)` | target / sequence の混在を吸収してシーンリストを返す |
-| `check_schedule(flow, now, last_fired)` | 現時刻で発火すべきエントリを返す（無ければ None） |
-| `next_schedule_str(flow, now)` | 次回発火予定の説明文を返す（UI 表示用） |
-
-#### PcFlowRunner (QObject)
-
-**Qt シグナル**
-
-| シグナル | 型 | タイミング |
-|----------|-----|-----------|
-| `log_message` | `str` | ログ行が出るたびに |
-| `scene_started` | `str, int, int` | シーン開始時 (name, step, total) |
-| `step_updated` | `int, int` | ステップ完了時 (current, total) |
-| `state_changed` | `str` | "running" / "idle" に切り替わった時 |
-| `next_schedule_changed` | `str` | 次回予定の説明文が変化した時 |
-
-**公開 API**
-
-```python
-runner = PcFlowRunner()
-runner.set_mouse(pico_mouse)          # PicoMouse インスタンスをセット
-runner.set_window_title("NIGHT CROWS")
-flow = runner.load_flow("flows/基本_pc.json")  # → PcFlow
-runner.start()                        # バックグラウンドスレッド開始
-runner.stop()                         # 停止要求（次のステップ境界で終了）
-runner.is_running                     # bool
-runner.current_scene                  # str（実行中シーン名）
-runner.current_step                   # (int, int)
-```
-
-**スケジュール発火ロジック**
-
-```
-起動時:
-  現時刻より前のエントリをすべて last_fired に登録（重複実行防止）
-
-ポーリングループ:
-  check_schedule(flow, now, last_fired)
-    条件: entry.time <= now.HH:MM
-          repeat="weekly" → today_weekday in entry.days
-          repeat="once"   → entry.date == today
-          last_fired[idx] != today（当日発火済みでない）
-  → 発火エントリを時刻昇順でソート → 最古を1件返す
-
-発火時:
-  last_fired[idx] = today
-  entry_scenes(entry) のシーンを順次 _run_scene() で実行
-  完了後 next_schedule_changed を emit
-```
+| ウィンドウサイズ | テンプレマッチが固定サイズ依存なので、作成時と実行時を揃える運用 |
+| TeamViewer 経由 | カーソル位置取得・Pico 操作・オーバーレイは動く。`InjectTouchInput` はリモートセッション制限で不可（経緯は `docs/pc_input.md`） |
+| Pico の必須性 | Nightcrows のチート対策で `SendInput` クリックは弾かれるため、Pico HID 必須 |
+| pick_scene の sequential | プロセス内 `_pick_counters` で順番管理。アプリ再起動でリセット |
+| マウス加速 | Windows のポインター加速が ON だと `move_to` の精度が落ちる。HID移動のスライダー最遅 (25 px/s) なら影響軽微 |
 
 ---
 
-### 4.3 pc_main.py — メインウィンドウ
+## 11. 関連ドキュメント
 
-#### ウィジェット構成
-
-```
-PcFlowWindow (QWidget)
-├── QGroupBox "ゲームウィンドウ"
-│   ├── QLabel  lbl_win   (✓/⚠/未設定 + タイトル)
-│   └── QPushButton btn_win  "選択…" → WindowPickerDialog
-│
-├── QGroupBox "Pico マウス"
-│   ├── QLabel  lbl_pico  (✓接続済 / ✗失敗)
-│   └── QPushButton btn_pico "接続" / "再接続"
-│
-├── QGroupBox "フロー"
-│   ├── QComboBox  combo_flow  (flows/*.json 一覧)
-│   ├── QPushButton btn_flow   "開始" / "停止"（赤）
-│   ├── QLabel  lbl_run_status  "待機中" / "実行中: シーン名 ステップ N/M"
-│   ├── QListWidget list_sched  スケジュール一覧
-│   └── QLabel  lbl_next_sched  "次回: HH:MM シーン名 (曜日) 残り Xh Ym"
-│
-├── QGroupBox "経験値メーター"
-│   ├── QLabel lbl_exp_cur   "現在値: XX.XXXX%"
-│   ├── QLabel lbl_exp_spd   "速度: +X.XX %/h"
-│   ├── QLabel lbl_exp_acc   "累計: +X.XXXX%"
-│   ├── QPushButton btn_exp  "計測開始" / "計測停止"（赤）
-│   └── QPushButton btn_exp_reset "リセット"
-│
-└── QGroupBox "ログ"
-    └── QTextEdit log_box  (読み取り専用、自動スクロール)
-```
-
-#### 起動シーケンス
-
-```
-__init__()
-  1. _build_ui()           ウィジェット生成
-  2. _connect_signals()    Qt シグナルを接続
-  3. _setup_meter()        古いログを削除
-  4. _load_flows_list()    flows/ ディレクトリを読んで combo_flow を埋める
-  5. _restore_settings()   settings.json から前回状態を復元
-  6. QTimer.singleShot(400ms) → _auto_connect_pico()
-  7. QTimer(1000ms)        → _refresh_status() を定期呼び出し
-```
-
-#### settings.json で保存する項目
-
-| キー | 型 | 説明 |
-|------|----|------|
-| `window_title` | str | 最後に選択したゲームウィンドウタイトル |
-| `last_flow` | str | 最後に選択したフロー JSON ファイル名 |
-| `region_rel` | list[float] | 経験値メーター計測領域（rx, ry, rw, rh） |
-| `digit_hint` | int | 経験値 OCR の桁数ヒント（1 or 2） |
-| `tesseract_cmd` | str | Tesseract 実行ファイルパス（空=自動検出） |
-| `log_retain_days` | int | ログ自動削除の日数 |
-
----
-
-### 4.4 run_pc_flow.py — エントリーポイント
-
-```python
-_ensure_cwd()   # exe / スクリプトのディレクトリを CWD にセット
-from gui.pc_main import main
-main()
-```
-
-`os.chdir()` で CWD を `pc/` に揃えることで、`scenes/`・`flows/`・`settings.json`・`logs/` がすべて `pc/` 直下で解決される。PyInstaller バンドル時も `sys.frozen` フラグで判定して正しく動作する。
-
----
-
-## 5. JSON フォーマット
-
-### 5.1 シーン JSON（pc/scenes/*.json）
-
-```json
-{
-  "name": "BF3 92LV",
-  "window_title": "NIGHT CROWS",
-  "steps": [
-    {
-      "type": "snapshot",
-      "path": "templates/BF3_92LV_start.png",
-      "timeout_s": 15,
-      "threshold": 0.85
-    },
-    {
-      "type": "tap",
-      "rx": 0.49,
-      "ry": 0.055,
-      "button": "L",
-      "duration_ms": 50
-    },
-    {
-      "type": "wait_fixed",
-      "seconds": 1.5
-    },
-    {
-      "type": "swipe",
-      "rx1": 0.89,
-      "ry1": 0.40,
-      "rx2": 0.89,
-      "ry2": 0.12,
-      "duration_ms": 600
-    }
-  ]
-}
-```
-
-#### ステップパラメータ一覧
-
-| type | パラメータ | 型 | デフォルト | 説明 |
-|------|-----------|-----|-----------|------|
-| `snapshot` | `path` | str | 必須 | テンプレート画像パス（CWD 相対） |
-| | `timeout_s` | float | 10.0 | 一致待ちのタイムアウト秒 |
-| | `threshold` | float | 0.85 | TM_CCOEFF_NORMED の最低スコア |
-| `tap` | `rx`, `ry` | float | 0.5 | クリック座標（ウィンドウ相対比率 0.0〜1.0） |
-| | `button` | str | "L" | "L" / "R" / "M" |
-| | `duration_ms` | int | 50 | ボタン押下時間（ms） |
-| `swipe` | `rx1`, `ry1` | float | 0.5 | 開始座標（ウィンドウ相対比率） |
-| | `rx2`, `ry2` | float | 0.5 | 終了座標（ウィンドウ相対比率） |
-| | `duration_ms` | int | 500 | スワイプ所要時間（ms） |
-| `wait_fixed` | `seconds` | float | 1.0 | 待機秒数 |
-
-### 5.2 フロー JSON（pc/flows/*.json）
-
-```json
-{
-  "name": "基本_pc",
-  "version": 1,
-  "schedule": [
-    {
-      "time": "08:30",
-      "target": "BF3_92LV.json",
-      "repeat": "weekly",
-      "days": [1, 2, 3]
-    },
-    {
-      "time": "13:30",
-      "target": "BF3_92LV.json",
-      "repeat": "weekly",
-      "days": [3, 4]
-    },
-    {
-      "time": "05:30",
-      "sequence": ["シーン1.json", "シーン2.json"],
-      "repeat": "daily"
-    }
-  ],
-  "watchers": [],
-  "settings": {
-    "polling_interval_s": 1.0
-  }
-}
-```
-
-#### ScheduleEntry パラメータ
-
-| キー | 型 | 説明 |
-|------|----|------|
-| `time` | str | 発火時刻 "HH:MM" |
-| `target` | str | 実行シーンファイル名（sequence が空のとき使用） |
-| `sequence` | list[str] | 順次実行するシーンのリスト |
-| `repeat` | str | "daily" / "weekly" / "once" |
-| `days` | list[int] | 曜日（0=月〜6=日）repeat="weekly" のとき |
-| `date` | str | "YYYY-MM-DD" repeat="once" のとき |
-| `enabled` | bool | false でスキップ（省略時 true） |
-
-**target と sequence の優先規則:**
-- `sequence` が空 → `[target]` を使用
-- `sequence` に `target` が含まれていない → `[target] + sequence`
-- それ以外 → `sequence` をそのまま使用
-
----
-
-## 6. 依存関係
-
-### 6.1 モジュール依存図
-
-```
-run_pc_flow.py
-    └── gui.pc_main
-            ├── gui.pc_flow
-            │       └── gui.pc_scene
-            │               ├── gui.capture
-            │               └── gui.window_picker
-            ├── gui.exp_meter
-            │       ├── gui.capture
-            │       ├── gui.ocr (Tesseract)
-            │       └── gui.window_picker
-            ├── gui.settings
-            ├── gui.window_picker
-            └── pico_mouse          ← pc/ 直下（try/except でオプション扱い）
-```
-
-### 6.2 外部ライブラリ
-
-| ライブラリ | 用途 | インストール |
-|-----------|------|------------|
-| PySide6 | GUI フレームワーク | `pip install PySide6` |
-| opencv-python | テンプレートマッチング | `pip install opencv-python` |
-| pywin32 | Win32 API (win32gui, win32con, win32ui) | `pip install pywin32` |
-| pyserial | Pico とのシリアル通信 | `pip install pyserial` |
-| pytesseract | 経験値 OCR | `pip install pytesseract` + Tesseract 本体 |
-| numpy | 画像データ処理 | `pip install numpy` |
-
-※ `.venv/` に整備済み（実行: `.venv\Scripts\python.exe run_pc_flow.py`）
-
-### 6.3 Pico ハードウェア依存
-
-- `pico_mouse.py` のみが pyserial に依存
-- `PicoMouse` のインポートは `try/except ImportError` でラップされており、**Pico 未接続でも GUI は起動する**
-- tap/swipe ステップは Pico 未接続時にスキップ（ログに記録）
-
----
-
-## 7. 起動方法
-
-### 開発時
-
-```bat
-cd D:\github2\nightcrows\pc
-..\venv\Scripts\python.exe run_pc_flow.py
-```
-
-またはプロジェクトルートの `run_pc.bat`（`run_exp_meter.py` 向けのため、別途 `run_pc_flow.bat` を作成するとよい）。
-
-### exe ビルド（PyInstaller）
-
-```bat
-cd D:\github2\nightcrows\pc
-..\venv\Scripts\pyinstaller --onefile --windowed --name "PCフロー制御" run_pc_flow.py
-```
-
-`_ensure_cwd()` が `sys.frozen` フラグを見て `sys.executable` のディレクトリを CWD にセットするため、`scenes/`・`flows/` を exe と同じフォルダに置けば動作する。
-
----
-
-## 8. 未完了タスク
-
-| # | 内容 | ファイル |
-|---|------|---------|
-| 5 | 座標記録ツール（`move_test.py` オプション9追加） | `pc/move_test.py` |
-| 6 | PC 用シーン JSON の作成 | `pc/scenes/*.json` |
-| 6 | PC 用テンプレート画像の収集 | `pc/templates/*.png` |
-| - | run_pc_flow.bat の作成（省力化） | プロジェクトルート |
-
----
-
-## 9. mobile 版との対応表
-
-| 項目 | mobile 版 | PC 版 |
-|------|-----------|-------|
-| 操作手段 | ADB `input tap / swipe` | Pico HID マウス |
-| 座標指定 | デバイス絶対 px | ウィンドウ相対比率（0.0〜1.0） |
-| 画面キャプチャ | ADB screencap | Win32 PrintWindow |
-| ウォッチャー | あり（常時監視スレッド） | なし（現時点） |
-| メインシーケンス | あり | なし（スケジュールのみ） |
-| フロー JSON | `mobile/flows/` | `pc/flows/`（同フォーマット） |
-| シーン JSON | `mobile/scenes/` | `pc/scenes/`（相対座標に変更） |
-| 実行ファイル | `mobile/run_gui.py` | `pc/run_pc_flow.py` |
+- `docs/pc_flow_design.md` — 当初構想（実装前のメモ）
+- `docs/pc_pico_mouse.md` — Pico HID マウスの実装詳細・ドラッグ戦略
+- `docs/pc_input.md` — PC 自動入力の検証メモ（SendInput / Touch Injection の結論）
+- `docs/changelog.md` — 作業履歴（セッションごとの差分）
