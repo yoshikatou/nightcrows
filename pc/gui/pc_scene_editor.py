@@ -65,6 +65,8 @@ class SceneEditorWindow(QWidget):
 
     _log_signal        = Signal(str)
     _play_state_signal = Signal(bool)   # True=実行中, False=停止
+    saved  = Signal(str)                # 保存完了 (パス) — メインの一覧更新トリガ
+    closed = Signal(object)             # ウィンドウクローズ通知 — 参照解除用
 
     def __init__(
         self,
@@ -145,6 +147,9 @@ class SceneEditorWindow(QWidget):
         btn_wait = QPushButton("wait_fixed 追加")
         btn_wait.clicked.connect(self._add_wait_fixed)
         rlay.addWidget(btn_wait)
+        btn_more = QPushButton("+ その他のステップ ▾")
+        btn_more.clicked.connect(self._show_add_step_menu)
+        rlay.addWidget(btn_more)
 
         # タップ後に自動で wait_fixed を追加するオプション
         tap_wait_row = QHBoxLayout()
@@ -264,25 +269,38 @@ class SceneEditorWindow(QWidget):
             return
 
         menu = QMenu(self)
-        act_wait  = menu.addAction("wait_image (この画像が出るまで待つ)")
-        act_tap   = menu.addAction("tap_image  (この画像を見つけてタップ)")
+        act_wait   = menu.addAction("wait_image (この画像が出るまで待つ)")
+        act_tap    = menu.addAction("tap_image  (この画像を見つけてタップ)")
         menu.addSeparator()
-        act_swipe = menu.addAction("swipe (左上 → 右下)")
+        act_swipe  = menu.addAction("swipe (左上 → 右下)")
+        act_scroll = menu.addAction("scroll (ジッター付き swipe)")
+        menu.addSeparator()
+        act_if     = menu.addAction("if_image (画像有無で分岐)")
         action = menu.exec(QCursor.pos())
         if action is None:
             return
 
-        if action is act_swipe:
-            self._scene.steps.append(PcStep(
-                type="swipe",
-                params={
-                    "rx1": round(rx, 4), "ry1": round(ry, 4),
-                    "rx2": round(rx + rw, 4), "ry2": round(ry + rh, 4),
-                    "duration_ms": 500,
-                },
-            ))
+        if action is act_swipe or action is act_scroll:
+            t = "swipe" if action is act_swipe else "scroll"
+            params: dict = {
+                "rx1": round(rx, 4), "ry1": round(ry, 4),
+                "rx2": round(rx + rw, 4), "ry2": round(ry + rh, 4),
+                "duration_ms": 500,
+            }
+            if t == "scroll":
+                # ジッターのデフォルトを領域比率と連動して 1% 程度に
+                params["rx1_jitter"] = 0.01
+                params["ry1_jitter"] = 0.01
+                params["rx2_jitter"] = 0.01
+                params["ry2_jitter"] = 0.01
+                params["duration_jitter_ms"] = 100
+            self._scene.steps.append(PcStep(type=t, params=params))
             self._refresh_steps()
             self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+            return
+
+        if action is act_if:
+            self._add_if_image(rx, ry, rw, rh)
             return
 
         # wait_image / tap_image: テンプレートを切り出して保存
@@ -335,6 +353,149 @@ class SceneEditorWindow(QWidget):
         self._refresh_steps()
         self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
 
+    # ---- B 系ステップの追加ヘルパー
+    def _list_scenes(self) -> list[str]:
+        if not os.path.isdir(SCENES_DIR):
+            return []
+        return [f for f in sorted(os.listdir(SCENES_DIR)) if f.endswith(".json")]
+
+    def _show_add_step_menu(self) -> None:
+        menu = QMenu(self)
+        menu.addAction("call_scene 追加",    self._add_call_scene)
+        menu.addAction("pick_scene 追加",    self._add_pick_scene)
+        menu.addAction("keyevent 追加",      self._add_keyevent)
+        menu.addAction("group_header 追加",  self._add_group_header)
+        menu.exec(QCursor.pos())
+
+    def _add_call_scene(self) -> None:
+        scenes = self._list_scenes()
+        if not scenes:
+            QMessageBox.information(self, "シーン一覧", "scenes/ にシーンがありません")
+            return
+        item, ok = QInputDialog.getItem(
+            self, "call_scene", "呼び出すシーン:", scenes, 0, False,
+        )
+        if not ok:
+            return
+        self._scene.steps.append(PcStep(type="call_scene", params={"scene": item}))
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+
+    def _add_pick_scene(self) -> None:
+        scenes = self._list_scenes()
+        if not scenes:
+            QMessageBox.information(self, "シーン一覧", "scenes/ にシーンがありません")
+            return
+        text, ok = QInputDialog.getMultiLineText(
+            self, "pick_scene",
+            "1 行 1 シーン名（既存シーン名で空行は無視）:",
+            "\n".join(scenes[:2]),
+        )
+        if not ok:
+            return
+        chosen = [s.strip() for s in text.splitlines() if s.strip()]
+        if not chosen:
+            return
+        mode, ok = QInputDialog.getItem(
+            self, "pick_scene", "選択モード:",
+            ["random", "sequential"], 0, False,
+        )
+        if not ok:
+            return
+        self._scene.steps.append(PcStep(
+            type="pick_scene",
+            params={"mode": mode, "scenes": chosen},
+        ))
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+
+    def _add_keyevent(self) -> None:
+        key, ok = QInputDialog.getText(
+            self, "keyevent",
+            "キー名 (例: esc, enter, f5, a, space):",
+        )
+        if not ok or not key.strip():
+            return
+        self._scene.steps.append(PcStep(
+            type="keyevent",
+            params={"key": key.strip(), "duration_ms": 30},
+        ))
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+
+    def _add_group_header(self) -> None:
+        label, ok = QInputDialog.getText(
+            self, "group_header", "見出し文字列:",
+        )
+        if not ok:
+            return
+        self._scene.steps.append(PcStep(
+            type="group_header",
+            params={"label": label.strip()},
+        ))
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+
+    def _add_if_image(self, rx: float, ry: float, rw: float, rh: float) -> None:
+        if self._current_snapshot_path is None:
+            QMessageBox.warning(self, "エラー", "先にスクショを取得してください")
+            return
+        # 領域を切り出してテンプレに保存
+        img = cv2.imread(self._current_snapshot_path)
+        if img is None:
+            QMessageBox.warning(self, "エラー", "スナップ画像が読み込めません")
+            return
+        ih, iw = img.shape[:2]
+        x0 = max(0, int(rx * iw))
+        y0 = max(0, int(ry * ih))
+        x1 = min(iw, int((rx + rw) * iw))
+        y1 = min(ih, int((ry + rh) * ih))
+        crop = img[y0:y1, x0:x1]
+        if crop.size == 0:
+            QMessageBox.warning(self, "エラー", "領域サイズが小さすぎます")
+            return
+        scene_dir = os.path.join(TEMPLATES_DIR, self._scene.name or "scene")
+        os.makedirs(scene_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        tpl_path = os.path.join(scene_dir, f"tpl_{ts}.png").replace("\\", "/")
+        cv2.imwrite(tpl_path, crop)
+
+        scenes = self._list_scenes()
+        if not scenes:
+            QMessageBox.information(self, "if_image", "scenes/ にシーンが無いため空で追加します")
+            then_name = ""
+            else_name = ""
+        else:
+            then_name, ok = QInputDialog.getItem(
+                self, "if_image", "then (画像あり)→ 実行シーン:",
+                ["(なし)"] + scenes, 0, False,
+            )
+            if not ok:
+                then_name = ""
+            elif then_name == "(なし)":
+                then_name = ""
+            else_name, ok = QInputDialog.getItem(
+                self, "if_image", "else (画像なし)→ 実行シーン:",
+                ["(なし)"] + scenes, 0, False,
+            )
+            if not ok:
+                else_name = ""
+            elif else_name == "(なし)":
+                else_name = ""
+
+        self._scene.steps.append(PcStep(
+            type="if_image",
+            params={
+                "template": tpl_path,
+                "threshold": 0.85,
+                "region": [round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4)],
+                "then_scene": then_name,
+                "else_scene": else_name,
+            },
+        ))
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+
     # ---------------------------------------------------------------- ステップ一覧
     def _refresh_steps(self) -> None:
         cur = self._list_steps.currentRow()
@@ -366,6 +527,27 @@ class SceneEditorWindow(QWidget):
                 f"({p.get('rx1', 0):.3f},{p.get('ry1', 0):.3f}) → "
                 f"({p.get('rx2', 0):.3f},{p.get('ry2', 0):.3f})"
             )
+        if s.type == "scroll":
+            return (
+                f"{i+1:02d}. 🌀 scroll "
+                f"({p.get('rx1', 0):.3f},{p.get('ry1', 0):.3f}) → "
+                f"({p.get('rx2', 0):.3f},{p.get('ry2', 0):.3f})  (ジッター)"
+            )
+        if s.type == "call_scene":
+            return f"{i+1:02d}. 📞 call_scene → {p.get('scene', '')}"
+        if s.type == "if_image":
+            name = os.path.basename(str(p.get("template", "")))
+            return (
+                f"{i+1:02d}. ❓ if_image {name}  then={p.get('then_scene', '')}  "
+                f"else={p.get('else_scene', '')}"
+            )
+        if s.type == "pick_scene":
+            scenes = p.get("scenes", []) or []
+            return f"{i+1:02d}. 🎲 pick_scene[{p.get('mode', 'random')}] ({len(scenes)} 件)"
+        if s.type == "keyevent":
+            return f"{i+1:02d}. ⌨ keyevent {p.get('key', '')!r}"
+        if s.type == "group_header":
+            return f"━━ {p.get('label', '')} ━━"
         return f"{i+1:02d}. {s.type}"
 
     def _on_step_selected(self) -> None:
@@ -547,4 +729,10 @@ class SceneEditorWindow(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "保存失敗", str(e))
             return
+        self.saved.emit(self._path)
         QMessageBox.information(self, "保存", f"保存しました: {self._path}")
+
+    def closeEvent(self, e) -> None:  # noqa: N802
+        self._stop_flag = True
+        self.closed.emit(self)
+        super().closeEvent(e)

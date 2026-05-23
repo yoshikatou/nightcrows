@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-05-23（ウォッチャー実装・ステップ拡張・ログ統合）
+
+### ウォッチャー機能を PC 版に新規実装
+
+**背景:** mobile 版にあった「画面を監視して条件を満たしたら割り込みシーンを実行」する仕組みを PC 版にも導入。テンプレマッチ・OCR・連続ヒット判定をエディタ内で構築し、フロー実行と連動できる形に。
+
+**新規ファイル:**
+- `pc/gui/pc_watcher.py`: `PcWatcher` / `WatcherCondition` データクラス、`evaluate_watcher` (`image_appear` / `image_gone` / `ocr_number` の 3 タイプ)、`EvalResult`、JSON I/O
+- `pc/gui/pc_watcher_editor.py`: 独立編集ウィンドウ（1000×800）。スクショ取得・領域選択・閾値・OCR 設定・ハンドラー/after 動作・優先度/冷却/ポーリング/通知・単発テスト・連続監視テスト・OCR 入力画像の debug 保存
+
+**メインウィンドウ:**
+- 見張りタブを placeholder から「ウォッチャー一覧 + 新規/編集/削除」に差し替え
+- 一覧の各アイテムに **チェックボックス** を追加（即時 JSON 上書きで有効/無効トグル）
+
+### シーン編集 UI に B 系ステップを追加できるように
+
+**追加ステップ:** `call_scene` / `if_image` / `keyevent` / `scroll` / `group_header` / `pick_scene`
+
+- キャンバスドラッグメニューに `scroll` (ジッター付き swipe) と `if_image` (then/else シーン分岐) を追加
+- 右ペインに「+ その他のステップ ▾」メニューを追加し、`call_scene` / `pick_scene` / `keyevent` / `group_header` を選択して追加可能
+- ステップ一覧ラベルに新タイプの絵文字 (🌀 scroll / 📞 call_scene / ❓ if_image / 🎲 pick_scene / ⌨ keyevent) を反映
+
+### `pc_scene.py` 実行エンジンに B 系ステップを実装
+
+- `call_scene`: シーン呼び出し。`_MAX_CALL_DEPTH=10` の階層上限と循環参照ガード付き
+- `if_image`: `cv2.matchTemplate` で領域内のテンプレ一致を判定し、`then_scene` / `else_scene` を呼ぶ
+- `keyevent`: `ctypes.windll.user32.keybd_event` で Win32 キー入力送信（`_KEY_VK_MAP` で esc / enter / f1〜f12 / a-z など）
+- `scroll`: `swipe` 動作にジッターを適用（座標 ±jitter / duration ±jitter_ms）
+- `group_header`: 表示用の no-op
+- `pick_scene`: `random` / `sequential` モードで scenes リストから 1 シーン選択して呼ぶ。`sequential` はプロセス内の `_pick_counters` で順番管理
+
+### `PcFlowRunner` にウォッチャー統合（A1〜A4）
+
+**処理フロー:**
+1. フロー開始時に `list_pc_watchers()` で有効なウォッチャーを全部読み込み、別スレッドで監視開始
+2. シーン実行中も並行ポーリング: ランダム間隔 (`poll_min_s` 〜 `poll_max_s`) で全 watcher を評価
+3. `consecutive` 回連続ヒットで発火 → 発火キュー追加 + `_watcher_pending` セット → `run_pc_scene` の `should_stop` が True → シーン中断
+4. メインループで発火キューを優先度順で取り出し、`handler` シーン実行（その間 watcher はポーズ）
+5. `after` 動作で復帰: `restart_scene` / `next_scene` / `stop` / `noop`
+
+**安全機構:**
+- 各 watcher ごとに `cooldown_s` 後しか再発火しない
+- `_hit_counts` / `_last_fired` をスレッドセーフに管理
+- 例外捕捉でループが落ちない
+
+### OCR 改善
+
+- **複数 PSM 試行**: `ocr_number` 評価で PSM 7 (1行) / 8 (単語) / 6 (ブロック) を順に試して最長数字列を採用
+- **EvalResult.note にデバッグ情報**: `crop=120x32 psm=7 var=2` 等
+- **テスト時の crop 保存**: `debug/ocr_<id>_<timestamp>.png` に切り出し画像を保存し、ログにパスを表示。実際に OCR にかかっている画像を目視確認できる
+- **Tesseract パスを `pc_main.py` でセットアップ**: 経験値メーター GUI と同じく起動時に `apply_path` で `pytesseract.tesseract_cmd` を設定。`run_pc_flow.py` 経由でも OCR が動くようにした
+
+### ログを統合・ローテーション対応
+
+- 新規 `pc/gui/logger.py`: `write_log(msg)` / `purge_old_logs(retain_days)` を提供
+- 保存先 `logs/YYYY-MM-DD.log`（mobile 版と同じ形式）
+- `PcFlowRunner._log` がファイル書き出しも行うようになり、フロー開始/停止・スケジュール発火・シーン実行・🔥 ウォッチャー発火・ハンドラー実行・after 動作などが全部ファイルに残る
+- ウォッチャー編集の監視テストは **発火イベントのみ** ファイルに残す（評価ログは画面のみで冗長を回避）
+- 起動時に `purge_old_logs` で 30 日より古いログを削除（`settings.json` の `log_retain_days` で変更可）
+
+### 編集ウィンドウのライフサイクル修正
+
+- `SceneEditorWindow` / `WatcherEditorWindow` に **`saved(str)` / `closed(object)` シグナル** を追加
+- メイン側で参照を保持していると `destroyed` が飛ばず一覧が更新されない問題を回避
+- 保存ボタン押下で即座にメイン一覧が更新される
+
+### キャンバスズーム / パン
+
+- `PcSnapshotCanvas` に **右クリック保持 + ホイールでマウス位置中心の拡大縮小** (1.0〜10.0 倍)
+- 拡大時は **右ボタンドラッグでパン**
+- 操作ヒントを編集ウィンドウ右下に表示
+
+### `.gitignore` 追加
+
+- `pc/debug/` を除外（OCR デバッグ画像）
+
+---
+
 ## 2026-05-22（シーン編集 UI 実装・ズーム/再生/テスト機能）
 
 ### `pc/gui/pc_scene.py` に `tap_image` ステップを追加

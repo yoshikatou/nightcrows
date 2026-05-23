@@ -1,18 +1,28 @@
 """PC シーン実行エンジン。
 
-PC シーン JSON を読み込み、各ステップを順次実行する:
-- snapshot:   Win32 キャプチャ + cv2.matchTemplate でテンプレート一致を待つ
-              (mobile の wait_image 相当)
-- tap_image:  テンプレートが一致した位置をクリック
-              (region で検索範囲を絞れる、tap_offset_x/y でクリック位置をずらせる)
-- tap:        PicoMouse.click()（rx/ry = ウィンドウクライアント相対比率 0.0〜1.0）
-- swipe:      PicoMouse.press() + move_to() + release()
-- wait_fixed: time.sleep()
+PC シーン JSON を読み込み、各ステップを順次実行する。
+
+ステップタイプ:
+- snapshot:     キャプチャ + cv2.matchTemplate でテンプレート一致を待つ (= wait_image)
+- tap_image:    テンプレートが一致した位置をクリック
+                (region で検索範囲を絞れる、tap_offset_x/y でクリック位置をずらせる)
+- tap:          PicoMouse.click()（rx/ry = ウィンドウクライアント相対比率 0.0〜1.0）
+- swipe:        PicoMouse.press() + move_to() + release()
+- scroll:       swipe にジッター付き
+                (rx1_jitter / ry1_jitter / rx2_jitter / ry2_jitter / duration_jitter_ms)
+- wait_fixed:   time.sleep()
+- call_scene:   別シーンを呼ぶ（最大階層 _MAX_CALL_DEPTH）
+- if_image:     画像一致なら then_scene、不一致なら else_scene を呼ぶ
+- pick_scene:   scenes リストから random / sequential で 1 シーン選んで呼ぶ
+- keyevent:     Win32 keybd_event でキー入力を送信
+- group_header: 表示用 no-op
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -28,6 +38,108 @@ StopFn = Callable[[], bool]
 StepCb = Callable[[int, int], None]   # (current_step, total_steps)
 
 SCENES_DIR = "scenes"
+_MAX_CALL_DEPTH = 10
+
+# pick_scene の "sequential" モード用カウンタ（プロセス内で状態保持）
+_pick_counters: dict[str, int] = {}
+
+# --------------------------------------- キーコード（keyevent ステップ用）
+_KEY_VK_MAP: dict[str, int] = {
+    "esc": 0x1B, "escape": 0x1B,
+    "enter": 0x0D, "return": 0x0D,
+    "tab": 0x09,
+    "space": 0x20, "spacebar": 0x20,
+    "backspace": 0x08, "bs": 0x08,
+    "delete": 0x2E, "del": 0x2E,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    "home": 0x24, "end": 0x23,
+    "pageup": 0x21, "pagedown": 0x22,
+    "shift": 0x10, "ctrl": 0x11, "alt": 0x12,
+    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
+    "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
+    "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+}
+
+
+def _vk_code(key: str) -> int | None:
+    k = key.strip().lower()
+    if k in _KEY_VK_MAP:
+        return _KEY_VK_MAP[k]
+    if len(k) == 1:
+        ch = k.upper()
+        if ch.isalnum():
+            return ord(ch)
+    return None
+
+
+def _send_key(key: str, hold_ms: int) -> bool:
+    vk = _vk_code(key)
+    if vk is None:
+        return False
+    user32 = ctypes.windll.user32
+    KEYEVENTF_KEYDOWN = 0x0000
+    KEYEVENTF_KEYUP   = 0x0002
+    user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+    time.sleep(max(0.01, hold_ms / 1000))
+    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+    return True
+
+
+def _resolve_scene_path(name: str) -> str | None:
+    """シーン名 or 相対/絶対パスから JSON のフルパスを解決する。"""
+    if not name:
+        return None
+    # 拡張子補完
+    if not name.endswith(".json"):
+        name = name + ".json"
+    # 既に絶対 or 相対パスなら優先
+    if os.path.isabs(name) and os.path.exists(name):
+        return name
+    if os.path.exists(name):
+        return name
+    candidate = os.path.join(SCENES_DIR, os.path.basename(name))
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
+def _match_template(img, tmpl_path: str, region) -> tuple[bool, float] | None:
+    """region 内でテンプレマッチ。(matched, score) を返す。失敗時 None。"""
+    tmpl = cv2.imread(tmpl_path, cv2.IMREAD_COLOR)
+    if tmpl is None or img is None:
+        return None
+    ih, iw = img.shape[:2]
+    if region and len(region) == 4:
+        rx, ry, rw, rh = region
+        x0 = max(0, int(rx * iw))
+        y0 = max(0, int(ry * ih))
+        x1 = min(iw, int((rx + rw) * iw))
+        y1 = min(ih, int((ry + rh) * ih))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        target = img[y0:y1, x0:x1]
+    else:
+        target = img
+    if target.shape[0] < tmpl.shape[0] or target.shape[1] < tmpl.shape[1]:
+        return None
+    res = cv2.matchTemplate(target, tmpl, cv2.TM_CCOEFF_NORMED)
+    _, maxv, _, _ = cv2.minMaxLoc(res)
+    return True, float(maxv)
+
+
+def _do_swipe(mouse, hwnd: int, rx1, ry1, rx2, ry2, duration_ms: int) -> None:
+    """共通の swipe 動作（移動 + ボタン押下 + 移動 + 解除）。"""
+    x1, y1 = rel_to_abs(hwnd, rx1, ry1)
+    x2, y2 = rel_to_abs(hwnd, rx2, ry2)
+    dist = max(1, max(abs(x2 - x1), abs(y2 - y1)))
+    n_steps = max(5, dist // 15)
+    step_delay = max(0.01, duration_ms / 1000.0 / n_steps)
+    max_step = max(1, dist // n_steps + 1)
+    mouse.move_cursor(x1, y1)
+    time.sleep(0.05)
+    mouse.press("L")
+    mouse.move_to(x2, y2, max_step=max_step, delay=step_delay)
+    mouse.release()
 
 
 # ----------------------------------------------------------------- データモデル
@@ -90,13 +202,51 @@ def run_pc_scene(
     log: LogFn = print,
     should_stop: StopFn = lambda: False,
     step_callback: StepCb | None = None,
+    depth: int = 0,
+    _call_stack: list[str] | None = None,
 ) -> bool:
-    """シーンを実行する。全ステップ完了なら True、中断/失敗なら False。"""
+    """シーンを実行する。全ステップ完了なら True、中断/失敗なら False。
+
+    depth / _call_stack は call_scene / if_image / pick_scene による
+    シーン呼び出しの階層管理用（再帰呼び出し時にインクリメント）。
+    """
     if hwnd is None and scene.window_title:
         hwnd = find_hwnd_by_title(scene.window_title)
+    if _call_stack is None:
+        _call_stack = []
 
     total = len(scene.steps)
-    log(f"シーン開始: {scene.name}  ({total} ステップ)")
+    indent = "  " * (1 + depth)
+    log(f"{indent}シーン開始: {scene.name}  ({total} ステップ)")
+
+    def _invoke_subscene(scene_name: str, label: str) -> bool | None:
+        """ヘルパー: call_scene / if_image / pick_scene の共通サブ実行。
+
+        戻り値: None=サブ呼び出ししなかった / True=成功 / False=失敗
+        """
+        if not scene_name:
+            return None
+        if depth + 1 > _MAX_CALL_DEPTH:
+            log(f"{indent}    {label}: 階層上限 ({_MAX_CALL_DEPTH}) 到達 — スキップ")
+            return None
+        if scene_name in _call_stack:
+            log(f"{indent}    {label}: 循環参照 {scene_name} — スキップ")
+            return None
+        path = _resolve_scene_path(scene_name)
+        if not path:
+            log(f"{indent}    {label}: シーンが見つかりません: {scene_name}")
+            return False
+        try:
+            sub = load_pc_scene(path)
+        except Exception as e:
+            log(f"{indent}    {label}: 読込失敗 {e}")
+            return False
+        return run_pc_scene(
+            sub, mouse, hwnd, log, should_stop,
+            step_callback=None,
+            depth=depth + 1,
+            _call_stack=_call_stack + [scene_name],
+        )
 
     for i, step in enumerate(scene.steps):
         if should_stop():
@@ -238,19 +388,94 @@ def run_pc_scene(
 
             if not _check_hwnd(hwnd, log) or not _check_mouse(mouse, log):
                 continue
+            _do_swipe(mouse, hwnd, rx1, ry1, rx2, ry2, duration_ms)
 
-            x1, y1 = rel_to_abs(hwnd, rx1, ry1)
-            x2, y2 = rel_to_abs(hwnd, rx2, ry2)
-            dist = max(1, max(abs(x2 - x1), abs(y2 - y1)))
-            n_steps = max(5, dist // 15)
-            step_delay = max(0.01, duration_ms / 1000.0 / n_steps)
-            max_step = max(1, dist // n_steps + 1)
+        elif t == "scroll":
+            rx1 = float(p.get("rx1", 0.5))
+            ry1 = float(p.get("ry1", 0.5))
+            rx2 = float(p.get("rx2", 0.5))
+            ry2 = float(p.get("ry2", 0.5))
+            duration_ms = int(p.get("duration_ms", 500))
+            rx1 += random.uniform(-float(p.get("rx1_jitter", 0.01)), float(p.get("rx1_jitter", 0.01)))
+            ry1 += random.uniform(-float(p.get("ry1_jitter", 0.01)), float(p.get("ry1_jitter", 0.01)))
+            rx2 += random.uniform(-float(p.get("rx2_jitter", 0.01)), float(p.get("rx2_jitter", 0.01)))
+            ry2 += random.uniform(-float(p.get("ry2_jitter", 0.01)), float(p.get("ry2_jitter", 0.01)))
+            dur_j = int(p.get("duration_jitter_ms", 100))
+            if dur_j > 0:
+                duration_ms = max(50, duration_ms + random.randint(-dur_j, dur_j))
+            log(
+                f"  [{i+1}/{total}] scroll ({rx1:.3f},{ry1:.3f}) -> ({rx2:.3f},{ry2:.3f})  "
+                f"({duration_ms}ms ジッター付き)"
+            )
+            if not _check_hwnd(hwnd, log) or not _check_mouse(mouse, log):
+                continue
+            _do_swipe(mouse, hwnd, rx1, ry1, rx2, ry2, duration_ms)
 
-            mouse.move_cursor(x1, y1)
-            time.sleep(0.05)
-            mouse.press("L")
-            mouse.move_to(x2, y2, max_step=max_step, delay=step_delay)
-            mouse.release()
+        elif t == "keyevent":
+            key = str(p.get("key", "")).strip()
+            hold_ms = int(p.get("duration_ms", 30))
+            log(f"  [{i+1}/{total}] keyevent {key!r}")
+            if not key:
+                log("    key 未指定 — スキップ")
+                continue
+            if not _send_key(key, hold_ms):
+                log(f"    未知のキー — スキップ")
+
+        elif t == "group_header":
+            label = str(p.get("label", ""))
+            log(f"  [{i+1}/{total}] ── {label} ──")
+
+        elif t == "call_scene":
+            scene_name = str(p.get("scene", ""))
+            log(f"  [{i+1}/{total}] call_scene → {scene_name}")
+            r = _invoke_subscene(scene_name, "call_scene")
+            if r is False:
+                return False
+
+        elif t == "if_image":
+            tmpl_path = str(p.get("template", p.get("path", "")))
+            threshold = float(p.get("threshold", 0.85))
+            region    = p.get("region")
+            then_name = str(p.get("then_scene", ""))
+            else_name = str(p.get("else_scene", ""))
+            log(f"  [{i+1}/{total}] if_image {tmpl_path}")
+            if not _check_hwnd(hwnd, log):
+                continue
+            img = capture_window(hwnd)
+            if img is None:
+                log("    キャプチャ失敗 → else 側で続行")
+                matched = False
+            else:
+                m = _match_template(img, tmpl_path, region)
+                if m is None:
+                    log("    判定不能（テンプレ/領域問題）→ else 側で続行")
+                    matched = False
+                else:
+                    _, score = m
+                    matched = score >= threshold
+                    log(f"    score={score:.3f}  threshold={threshold:.2f}  → {'then' if matched else 'else'}")
+            target_name = then_name if matched else else_name
+            r = _invoke_subscene(target_name, "if_image")
+            if r is False:
+                return False
+
+        elif t == "pick_scene":
+            scenes = list(p.get("scenes", []) or [])
+            mode = str(p.get("mode", "random"))
+            step_id = str(p.get("step_id", "")) or f"{scene.name}#{i}"
+            if not scenes:
+                log(f"  [{i+1}/{total}] pick_scene: シーン未指定 — スキップ")
+                continue
+            if mode == "sequential":
+                idx = _pick_counters.get(step_id, 0) % len(scenes)
+                _pick_counters[step_id] = (idx + 1) % len(scenes)
+                chosen = scenes[idx]
+            else:
+                chosen = random.choice(scenes)
+            log(f"  [{i+1}/{total}] pick_scene[{mode}] → {chosen}")
+            r = _invoke_subscene(chosen, "pick_scene")
+            if r is False:
+                return False
 
         else:
             log(f"  [{i+1}/{total}] 不明なステップタイプ: {t!r} — スキップ")

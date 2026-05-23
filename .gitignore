@@ -13,4 +13,6 @@ pc/dist/
 pc/*.spec
 pc/tools/
 pc/snapshots/
+pc/debug/
+.claude/
 refs/

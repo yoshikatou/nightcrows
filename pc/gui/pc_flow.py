@@ -2,11 +2,21 @@
 
 mobile/gui/flow.py と同じ JSON フォーマット（schedule・settings）を扱う。
 mobile/ への依存を持たず PC 単体で動作するよう、必要な部分を再実装している。
+
+実行ループ:
+    1. スケジュール発火を検出 → 対応するシーン列を順次実行
+    2. シーン実行中も別スレッドでウォッチャーをポーリング
+    3. ウォッチャー発火 → シーン中断 → handler シーン実行 → after 動作
+       - after = "restart_scene": 同じシーンを最初からやり直す
+       - after = "next_scene":    次のシーンへ進む
+       - after = "stop":          フロー停止
+       - after = "noop":          何もしない（中断したシーンはスキップ）
 """
 from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,7 +25,10 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
 
+from .capture import capture_window
+from .logger import write_log
 from .pc_scene import SCENES_DIR, load_pc_scene, run_pc_scene
+from .pc_watcher import PcWatcher, evaluate_watcher, list_pc_watchers
 from .window_picker import find_hwnd_by_title
 
 LogFn = Callable[[str], None]
@@ -231,6 +244,17 @@ class PcFlowRunner(QObject):
         self._current_step = 0
         self._total_steps = 0
 
+        # ウォッチャー関連
+        self._watchers: list[PcWatcher] = []
+        self._watcher_thread: threading.Thread | None = None
+        self._watcher_stop = threading.Event()
+        self._watcher_paused = threading.Event()
+        self._watcher_pending = threading.Event()
+        self._fired_lock = threading.Lock()
+        self._fired_queue: list[tuple[PcWatcher, str]] = []   # (watcher, info文字列)
+        self._hit_counts: dict[str, int] = {}
+        self._last_fired: dict[str, float] = {}
+
     # ---- 公開 API ----
     @property
     def is_running(self) -> bool:
@@ -269,9 +293,11 @@ class PcFlowRunner(QObject):
 
     # ---- 内部 ----
     def _should_stop(self) -> bool:
-        return self._stop_event.is_set()
+        # ウォッチャー発火もシーン中断トリガになる（後で発火処理）
+        return self._stop_event.is_set() or self._watcher_pending.is_set()
 
     def _log(self, msg: str) -> None:
+        write_log(msg)
         self.log_message.emit(msg)
 
     def _emit_next_schedule(self) -> None:
@@ -315,6 +341,127 @@ class PcFlowRunner(QObject):
             step_callback=self._step_cb,
         )
 
+    # ---------------------------------------------- ウォッチャーポーリング
+    def _start_watcher_thread(self) -> None:
+        # watchers/ から有効なものだけ読み込む
+        loaded = [w for _, w in list_pc_watchers() if w.enabled]
+        if not loaded:
+            self._log("ウォッチャー: 0 件（バックグラウンド監視は無効）")
+            return
+        self._watchers = loaded
+        self._log(f"ウォッチャー: {len(loaded)} 件を監視開始")
+        self._watcher_stop.clear()
+        self._watcher_paused.clear()
+        self._hit_counts.clear()
+        self._last_fired.clear()
+        with self._fired_lock:
+            self._fired_queue.clear()
+        self._watcher_pending.clear()
+        self._watcher_thread = threading.Thread(
+            target=self._watcher_loop, daemon=True,
+        )
+        self._watcher_thread.start()
+
+    def _stop_watcher_thread(self) -> None:
+        self._watcher_stop.set()
+        t = self._watcher_thread
+        if t and t.is_alive():
+            t.join(timeout=2.0)
+        self._watcher_thread = None
+        self._watchers = []
+
+    def _watcher_loop(self) -> None:
+        while not self._watcher_stop.is_set():
+            if self._watcher_paused.is_set():
+                time.sleep(0.2)
+                continue
+            hwnd = find_hwnd_by_title(self._window_title) if self._window_title else None
+            if not hwnd:
+                time.sleep(1.0)
+                continue
+            img = capture_window(hwnd)
+            if img is None:
+                time.sleep(0.5)
+                continue
+
+            now = time.monotonic()
+            min_interval = 60.0
+            for w in self._watchers:
+                if self._watcher_stop.is_set():
+                    break
+                # 冷却中はスキップ
+                if (self._last_fired.get(w.id, 0.0) + w.cooldown_s) > now:
+                    continue
+                try:
+                    r = evaluate_watcher(img, w)
+                except Exception as e:
+                    self._log(f"ウォッチャー評価例外 [{w.title}]: {e}")
+                    continue
+                need = max(1, w.condition.consecutive)
+                if r.fired:
+                    self._hit_counts[w.id] = self._hit_counts.get(w.id, 0) + 1
+                    if self._hit_counts[w.id] >= need:
+                        self._hit_counts[w.id] = 0
+                        self._last_fired[w.id] = now
+                        info = self._fmt_eval(w, r)
+                        with self._fired_lock:
+                            self._fired_queue.append((w, info))
+                        self._watcher_pending.set()
+                        self._log(f"🔥 ウォッチャー発火: [{w.title}] {info}")
+                else:
+                    self._hit_counts[w.id] = 0
+                # 個別ウォッチャーの最短 poll を集約してスリープ時間に使う
+                wp = max(0.2, min(w.poll_min_s, w.poll_max_s) or 1.0)
+                if wp < min_interval:
+                    min_interval = wp
+
+            # 全ウォッチャーの最短間隔（min〜max からランダム）でスリープ
+            if self._watchers:
+                pmin = min(max(0.2, w.poll_min_s) for w in self._watchers)
+                pmax = max(pmin, max(w.poll_max_s for w in self._watchers))
+                interval = random.uniform(pmin, pmax)
+            else:
+                interval = 1.0
+            waited = 0.0
+            while waited < interval and not self._watcher_stop.is_set():
+                time.sleep(min(0.1, interval - waited))
+                waited += 0.1
+
+    @staticmethod
+    def _fmt_eval(w: PcWatcher, r) -> str:
+        c = w.condition
+        if c.type in ("image_appear", "image_gone"):
+            score = f"{r.score:.3f}" if r.score is not None else "—"
+            return f"score={score} threshold={c.threshold:.2f}"
+        if c.type == "ocr_number":
+            val = f"{r.value:.0f}" if r.value is not None else "—"
+            return f"値={val} {c.op} {c.value:.0f}"
+        return ""
+
+    def _pop_fired(self) -> tuple[PcWatcher, str] | None:
+        """発火キューから優先度順で 1 件取り出す。"""
+        with self._fired_lock:
+            if not self._fired_queue:
+                self._watcher_pending.clear()
+                return None
+            self._fired_queue.sort(key=lambda t: -t[0].priority)
+            item = self._fired_queue.pop(0)
+            if not self._fired_queue:
+                self._watcher_pending.clear()
+            return item
+
+    def _handle_fired(self, w: PcWatcher, info: str) -> str:
+        """発火を1件処理して、after アクション文字列を返す。"""
+        if w.handler:
+            self._watcher_paused.set()
+            try:
+                self._log(f"ハンドラー実行: {w.handler}")
+                self._run_scene(w.handler)
+            finally:
+                self._watcher_paused.clear()
+        return w.after or "noop"
+
+    # ---------------------------------------------- メインループ
     def _run(self) -> None:
         flow = self._flow
         if flow is None:
@@ -346,31 +493,79 @@ class PcFlowRunner(QObject):
 
         poll = max(0.5, flow.settings.polling_interval_s)
 
+        # ウォッチャー監視を開始
+        self._start_watcher_thread()
+
         try:
-            while not self._should_stop():
+            while not self._stop_event.is_set():
+                # 発火が溜まっていれば最初に処理（シーン外でも反応）
+                fired = self._pop_fired()
+                if fired:
+                    w, info = fired
+                    action = self._handle_fired(w, info)
+                    if action == "stop":
+                        self._log("after=stop によりフロー停止")
+                        break
+                    # restart_scene / next_scene はシーン実行中の中断時に意味を持つ
+                    # シーン外（待機中）なら after は noop と同じ扱い
+                    continue
+
                 result = check_schedule(flow, datetime.now(), last_fired)
                 if result is not None:
                     idx, entry = result
                     last_fired[idx] = datetime.now().date()
                     scenes = entry_scenes(entry)
                     self._log(f"スケジュール発火: {entry.time} → {scenes}")
-                    for k, path in enumerate(scenes):
-                        if self._should_stop():
-                            break
-                        self._log(f"シーン実行 [{k+1}/{len(scenes)}]: {path}")
-                        self._run_scene(path)
+                    if not self._run_scenes_with_watcher(scenes):
+                        # stop アクションが発火
+                        break
                     self._emit_next_schedule()
                     continue
 
-                # ポーリング待機（0.1 秒刻みで停止を確認）
+                # ポーリング待機（0.1 秒刻みで停止 / 発火を確認）
                 for _ in range(max(1, int(poll * 10))):
-                    if self._should_stop():
+                    if self._stop_event.is_set() or self._watcher_pending.is_set():
                         break
                     time.sleep(0.1)
                 self._emit_next_schedule()
         finally:
+            self._stop_watcher_thread()
             self._current_scene = ""
             self._current_step = 0
             self._total_steps = 0
             self.state_changed.emit("idle")
             self._log("フロー停止")
+
+    def _run_scenes_with_watcher(self, scenes: list[str]) -> bool:
+        """シーン列を順次実行し、途中の発火を処理する。
+
+        戻り値 True=継続、False=フロー停止要求 (after=stop)
+        """
+        k = 0
+        while k < len(scenes):
+            if self._stop_event.is_set():
+                return True
+            path = scenes[k]
+            self._log(f"シーン実行 [{k+1}/{len(scenes)}]: {path}")
+            self._run_scene(path)
+            # シーン終了後（または発火による中断後）、発火キューを処理
+            consumed_any = False
+            while True:
+                fired = self._pop_fired()
+                if fired is None:
+                    break
+                consumed_any = True
+                w, info = fired
+                action = self._handle_fired(w, info)
+                if action == "stop":
+                    return False
+                if action == "restart_scene":
+                    self._log(f"after=restart_scene: シーン {path} を再実行")
+                    k -= 1  # 後の k += 1 で同じ index に戻る
+                    break
+                if action == "next_scene":
+                    self._log("after=next_scene: 次シーンへ")
+                    break
+                # noop: 中断した場合は本来の sequence を続けるためそのまま
+            k += 1
+        return True

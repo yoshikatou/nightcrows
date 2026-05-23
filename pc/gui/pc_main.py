@@ -40,7 +40,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .exp_meter import DEFAULT_LOG_RETAIN_DAYS, ExpMeter
+from .exp_meter import ExpMeter
+from .logger import DEFAULT_LOG_RETAIN_DAYS, purge_old_logs, write_log
 from .pc_flow import (
     DAY_NAMES,
     FLOWS_DIR,
@@ -50,7 +51,10 @@ from .pc_flow import (
 )
 from .pc_scene import SCENES_DIR
 from .pc_scene_editor import SceneEditorWindow
+from .pc_watcher import WATCHERS_DIR, load_pc_watcher, save_pc_watcher
+from .pc_watcher_editor import WatcherEditorWindow
 from .settings import load_settings, save_settings
+from .tesseract import apply_path as apply_tesseract_path, detect_tesseract
 from .window_picker import WindowPickerDialog, find_hwnd_by_title
 
 try:
@@ -76,6 +80,7 @@ class PcFlowWindow(QWidget):
         self._build_ui()
         self._connect_signals()
         self._purge_old_logs()
+        self._setup_tesseract()
         self._load_flows_list()
         self._restore_settings()
 
@@ -333,12 +338,48 @@ class PcFlowWindow(QWidget):
         lay.addWidget(self._test_log, 1)
         return w
 
-    # ---- ウォッチャータブ（未実装）
+    # ---- 見張りタブ: ウォッチャー一覧 + 編集起動（別ウィンドウ）
     def _build_tab_watcher(self) -> QWidget:
-        return self._build_placeholder(
-            "見張り（ウォッチャー）",
-            "未実装。次フェーズで mobile/gui/watcher_editor.py から移植予定。",
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 8, 6, 6)
+        lay.setSpacing(6)
+
+        lay.addWidget(QLabel("ウォッチャー一覧（チェックで有効／無効切替）:"))
+        self._list_watchers = QListWidget()
+        self._list_watchers.itemDoubleClicked.connect(
+            lambda _i: self._open_watcher_editor()
         )
+        self._list_watchers.itemChanged.connect(self._on_watcher_item_changed)
+        lay.addWidget(self._list_watchers, 1)
+
+        btn_row = QHBoxLayout()
+        btn_new  = QPushButton("新規")
+        btn_new.clicked.connect(self._new_watcher)
+        btn_edit = QPushButton("編集…")
+        btn_edit.clicked.connect(self._open_watcher_editor)
+        btn_del  = QPushButton("削除")
+        btn_del.clicked.connect(self._delete_watcher)
+        btn_row.addWidget(btn_new)
+        btn_row.addWidget(btn_edit)
+        btn_row.addWidget(btn_del)
+        lay.addLayout(btn_row)
+
+        btn_refresh = QPushButton("一覧更新")
+        btn_refresh.clicked.connect(self._reload_watchers_list)
+        lay.addWidget(btn_refresh)
+
+        hint = QLabel(
+            "編集は別ウィンドウで開きます。"
+            "現フェーズではフロー実行と連動せず、編集画面内の単独テストで動作確認。"
+        )
+        hint.setStyleSheet("color:#666; font-size:11px;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self._reload_watchers_list()
+        self._watcher_editors: list[WatcherEditorWindow] = []
+        return w
 
     # ---- 作成タブ: シーン一覧 + 編集起動（別ウィンドウ）
     def _build_tab_editor(self) -> QWidget:
@@ -407,7 +448,8 @@ class PcFlowWindow(QWidget):
         win = SceneEditorWindow(
             path, window_title=title, mouse_provider=lambda: self._mouse,
         )
-        win.destroyed.connect(lambda _: self._reload_scenes_list())
+        win.saved.connect(lambda _p: self._reload_scenes_list())
+        win.closed.connect(self._on_scene_editor_closed)
         self._scene_editors.append(win)
         win.show()
 
@@ -416,9 +458,15 @@ class PcFlowWindow(QWidget):
         win = SceneEditorWindow(
             None, window_title=title, mouse_provider=lambda: self._mouse,
         )
-        win.destroyed.connect(lambda _: self._reload_scenes_list())
+        win.saved.connect(lambda _p: self._reload_scenes_list())
+        win.closed.connect(self._on_scene_editor_closed)
         self._scene_editors.append(win)
         win.show()
+
+    def _on_scene_editor_closed(self, win) -> None:
+        if win in self._scene_editors:
+            self._scene_editors.remove(win)
+        self._reload_scenes_list()
 
     def _duplicate_scene(self) -> None:
         path = self._selected_scene_path()
@@ -450,6 +498,94 @@ class PcFlowWindow(QWidget):
             QMessageBox.warning(self, "削除失敗", str(e))
             return
         self._reload_scenes_list()
+
+    # ---- ウォッチャー一覧の操作（見張りタブ）
+    def _reload_watchers_list(self) -> None:
+        # 再描画中の itemChanged 連鎖を防ぐためシグナルブロック
+        self._list_watchers.blockSignals(True)
+        try:
+            self._list_watchers.clear()
+            if not os.path.isdir(WATCHERS_DIR):
+                return
+            for fname in sorted(os.listdir(WATCHERS_DIR)):
+                if not fname.endswith(".json"):
+                    continue
+                path = os.path.join(WATCHERS_DIR, fname)
+                try:
+                    w = load_pc_watcher(path)
+                except Exception:
+                    continue
+                label = f"{w.title or fname}  [{w.condition.type}]"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, path)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if w.enabled else Qt.Unchecked)
+                self._list_watchers.addItem(item)
+        finally:
+            self._list_watchers.blockSignals(False)
+
+    def _on_watcher_item_changed(self, item: QListWidgetItem) -> None:
+        """一覧のチェックボックスで有効/無効を即トグルし JSON を更新する。"""
+        path = item.data(Qt.UserRole)
+        if not path or not os.path.exists(path):
+            return
+        new_enabled = (item.checkState() == Qt.Checked)
+        try:
+            w = load_pc_watcher(path)
+            if w.enabled == new_enabled:
+                return
+            w.enabled = new_enabled
+            save_pc_watcher(w, path)
+            self._append_log(
+                f"ウォッチャー {'✓有効' if new_enabled else '✗無効'}: {w.title}"
+            )
+        except Exception as e:
+            self._append_log(f"⚠ 切替失敗: {e}")
+
+    def _selected_watcher_path(self) -> str | None:
+        item = self._list_watchers.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.UserRole)
+
+    def _open_watcher_editor(self) -> None:
+        path = self._selected_watcher_path()
+        title = self._settings.get("window_title", "")
+        win = WatcherEditorWindow(path, window_title=title)
+        win.saved.connect(lambda _p: self._reload_watchers_list())
+        win.closed.connect(self._on_watcher_editor_closed)
+        self._watcher_editors.append(win)
+        win.show()
+
+    def _new_watcher(self) -> None:
+        title = self._settings.get("window_title", "")
+        win = WatcherEditorWindow(None, window_title=title)
+        win.saved.connect(lambda _p: self._reload_watchers_list())
+        win.closed.connect(self._on_watcher_editor_closed)
+        self._watcher_editors.append(win)
+        win.show()
+
+    def _on_watcher_editor_closed(self, win) -> None:
+        if win in self._watcher_editors:
+            self._watcher_editors.remove(win)
+        self._reload_watchers_list()
+
+    def _delete_watcher(self) -> None:
+        path = self._selected_watcher_path()
+        if not path or not os.path.exists(path):
+            return
+        from PySide6.QtWidgets import QMessageBox
+        if QMessageBox.question(
+            self, "削除確認",
+            f"{os.path.basename(path)} を削除しますか？",
+        ) != QMessageBox.Yes:
+            return
+        try:
+            os.remove(path)
+        except Exception as e:
+            QMessageBox.warning(self, "削除失敗", str(e))
+            return
+        self._reload_watchers_list()
 
     # ---- ログタブ
     def _build_tab_log(self) -> QWidget:
@@ -495,7 +631,29 @@ class PcFlowWindow(QWidget):
     # ---------------------------------------------------------------- 設定復元
     def _purge_old_logs(self) -> None:
         retain = int(self._settings.get("log_retain_days", DEFAULT_LOG_RETAIN_DAYS))
-        ExpMeter.purge_old_logs(retain)
+        removed = purge_old_logs(retain)
+        if removed:
+            self._append_log(f"ログ整理: {removed} 日分の古いファイルを削除")
+
+    def _setup_tesseract(self) -> None:
+        """Tesseract OCR のパスを pytesseract に設定する（設定優先 → 自動検出）。
+
+        未検出でもエラーにはせず、ログに警告するのみ。
+        OCR を使う機能（ウォッチャーの ocr_number、経験値メーター）で初めて影響する。
+        """
+        cmd = (self._settings.get("tesseract_cmd") or "").strip()
+        if cmd and os.path.isfile(cmd):
+            apply_tesseract_path(cmd)
+            self._append_log(f"Tesseract: {cmd}")
+            return
+        found = detect_tesseract()
+        if found:
+            apply_tesseract_path(found)
+            self._settings["tesseract_cmd"] = found
+            save_settings(self._settings)
+            self._append_log(f"Tesseract 自動検出: {found}")
+        else:
+            self._append_log("⚠ Tesseract が見つかりません — OCR 機能は使えません")
 
     def _restore_settings(self) -> None:
         title = self._settings.get("window_title", "")
