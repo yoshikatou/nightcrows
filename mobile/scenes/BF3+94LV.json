@@ -1,0 +1,145 @@
+{
+  "name": "BF3+94LV",
+  "device_ip": "NRBMYDUCIBPJSKA6",
+  "rotation": 0,
+  "phys_size": [
+    1220,
+    2712
+  ],
+  "logical_size": [
+    1220,
+    2712
+  ],
+  "steps": [
+    {
+      "type": "group_header",
+      "label": "BF3"
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_154842_799327.png"
+    },
+    {
+      "type": "tap",
+      "x": 2555,
+      "y": 52,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_154853_286563.png"
+    },
+    {
+      "type": "tap",
+      "x": 2348,
+      "y": 579,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260503_154918_289019.png"
+    },
+    {
+      "type": "tap",
+      "x": 1860,
+      "y": 952,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 20.0
+    },
+    {
+      "type": "group_header",
+      "label": "BF94LV"
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260524_061508_548584.png"
+    },
+    {
+      "type": "tap",
+      "x": 599,
+      "y": 133,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260524_061528_514679.png"
+    },
+    {
+      "type": "tap",
+      "x": 314,
+      "y": 245,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260524_061603_523272.png"
+    },
+    {
+      "type": "tap",
+      "x": 780,
+      "y": 1039,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260524_061622_443192.png"
+    },
+    {
+      "type": "tap",
+      "x": 806,
+      "y": 974,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "tap",
+      "x": 2539,
+      "y": 34,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 30.0
+    },
+    {
+      "type": "snapshot",
+      "path": "templates/snapshots/snap_20260524_061811_203008.png"
+    },
+    {
+      "type": "tap",
+      "x": 2543,
+      "y": 767,
+      "duration_ms": 100
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.0
+    }
+  ]
+}
