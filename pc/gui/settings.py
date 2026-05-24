@@ -9,9 +9,10 @@ EXP_METER_PATH = "exp_meter.json"
 
 _DEFAULTS = {
     "window_title": "",
-    "tesseract_cmd": "",     # 空欄 = 自動検出
-    "overlay_pos": None,     # [x, y] or None (= 右上)
-    "log_retain_days": 30,   # この日数より古いログは起動時に自動削除（1〜365）
+    "tesseract_cmd": "",        # 空欄 = 自動検出
+    "overlay_pos": None,        # [x, y] or None (= 右上)
+    "log_retain_days": 30,      # この日数より古いログは起動時に自動削除（1〜365）
+    "google_chat_webhook": "",  # 空欄 = 通知無効。Google Chat の Incoming Webhook URL
 }
 
 

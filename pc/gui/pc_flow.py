@@ -27,6 +27,7 @@ from PySide6.QtCore import QObject, Signal
 
 from .capture import capture_window
 from .logger import write_log
+from .notify import send_google_chat
 from .pc_scene import SCENES_DIR, load_pc_scene, run_pc_scene
 from .pc_watcher import PcWatcher, evaluate_watcher, list_pc_watchers
 from .window_picker import find_hwnd_by_title
@@ -47,6 +48,9 @@ class ScheduleEntry:
     days: list[int] = field(default_factory=list)
     date: str = ""
     enabled: bool = True
+    # 続けて実行エントリ。True なら time/repeat/days/date は無視され、
+    # schedule リスト上の「直前の非 seq エントリ」が完了した直後に実行される。
+    seq: bool = False
 
 
 @dataclass
@@ -76,6 +80,7 @@ def load_pc_flow(path: str) -> PcFlow:
             days=list(s.get("days", []) or []),
             date=s.get("date", ""),
             enabled=bool(s.get("enabled", True)),
+            seq=bool(s.get("seq", False)),
         ))
     settings_d = data.get("settings", {}) or {}
     return PcFlow(
@@ -100,6 +105,8 @@ def save_pc_flow(flow: PcFlow, path: str) -> None:
             row["date"] = s.date
         if not s.enabled:
             row["enabled"] = False
+        if s.seq:
+            row["seq"] = True
         rows.append(row)
     data = {
         "name": flow.name,
@@ -125,6 +132,41 @@ def entry_scenes(entry: ScheduleEntry) -> list[str]:
     return list(entry.sequence)
 
 
+def _entry_fingerprint(e: ScheduleEntry) -> tuple:
+    """エントリの「実体としての同一性」を表すタプル。
+
+    実行中のフロー差し替え時に「同じエントリ」を見つけて last_fired を継承するために使う。
+    enabled は無視（無効化しても「同じエントリ」と見なす）。
+    """
+    return (
+        e.time, e.target, tuple(e.sequence), e.repeat,
+        tuple(e.days), e.date, e.seq,
+    )
+
+
+def migrate_last_fired(
+    old_flow: PcFlow, new_flow: PcFlow, last_fired: dict[int, date],
+) -> dict[int, date]:
+    """フロー差し替え時、idx ベースの last_fired を新フローの idx に翻訳する。
+
+    同じ指紋のエントリを探して、既に発火済みなら新 idx へ継承（再発火を防ぐ）。
+    削除されたエントリは載らない。新規追加されたエントリは未発火扱い。
+    """
+    new_lf: dict[int, date] = {}
+    new_by_fp: dict[tuple, list[int]] = {}
+    for new_idx, ne in enumerate(new_flow.schedule):
+        new_by_fp.setdefault(_entry_fingerprint(ne), []).append(new_idx)
+    for old_idx, fired_date in last_fired.items():
+        if old_idx >= len(old_flow.schedule):
+            continue
+        fp = _entry_fingerprint(old_flow.schedule[old_idx])
+        candidates = new_by_fp.get(fp, [])
+        if not candidates:
+            continue
+        new_lf[candidates.pop(0)] = fired_date   # 多重マッチは消費して二重割当防止
+    return new_lf
+
+
 def check_schedule(
     flow: PcFlow, now: datetime, last_fired: dict[int, date]
 ) -> tuple[int, ScheduleEntry] | None:
@@ -136,6 +178,9 @@ def check_schedule(
     candidates: list[tuple[str, int, ScheduleEntry]] = []
     for idx, entry in enumerate(flow.schedule):
         if not entry.enabled:
+            continue
+        if entry.seq:
+            # 続けて実行エントリは時刻トリガーしない（直前エントリ完了後に連鎖実行）
             continue
         if entry.time > current_hm:
             continue
@@ -161,6 +206,9 @@ def next_schedule_str(flow: PcFlow, now: datetime) -> str:
 
     for entry in flow.schedule:
         if not entry.enabled:
+            continue
+        if entry.seq:
+            # 続けて実行エントリは時刻トリガー対象外
             continue
         try:
             h, m = map(int, entry.time.split(":"))
@@ -244,6 +292,9 @@ class PcFlowRunner(QObject):
         self._current_step = 0
         self._total_steps = 0
 
+        # 通知設定（Google Chat Webhook）。空文字なら通知しない。
+        self._notify_webhook = ""
+
         # ウォッチャー関連
         self._watchers: list[PcWatcher] = []
         self._watcher_thread: threading.Thread | None = None
@@ -273,6 +324,10 @@ class PcFlowRunner(QObject):
 
     def set_window_title(self, title: str) -> None:
         self._window_title = title
+
+    def set_notify_webhook(self, url: str) -> None:
+        """Google Chat の Webhook URL を設定。空文字で通知無効。"""
+        self._notify_webhook = (url or "").strip()
 
     def load_flow(self, path: str) -> PcFlow:
         flow = load_pc_flow(path)
@@ -408,6 +463,7 @@ class PcFlowRunner(QObject):
                             self._fired_queue.append((w, info))
                         self._watcher_pending.set()
                         self._log(f"🔥 ウォッチャー発火: [{w.title}] {info}")
+                        self._notify_watcher_fired(w, info)
                 else:
                     self._hit_counts[w.id] = 0
                 # 個別ウォッチャーの最短 poll を集約してスリープ時間に使う
@@ -426,6 +482,28 @@ class PcFlowRunner(QObject):
             while waited < interval and not self._watcher_stop.is_set():
                 time.sleep(min(0.1, interval - waited))
                 waited += 0.1
+
+    def _notify_watcher_fired(self, w: PcWatcher, info: str) -> None:
+        """Google Chat へウォッチャー発火を非同期通知する（設定があれば）。"""
+        url = self._notify_webhook
+        if not url:
+            return
+        # フロー名・対象ウィンドウを補助情報として添える
+        flow_name = self._flow.name if self._flow else "(不明)"
+        cond = w.condition.type if w.condition else "?"
+        body = (
+            f"条件: {cond}\n"
+            f"判定: {info}\n"
+            f"フロー: {flow_name}\n"
+            f"対象: {self._window_title or '(未設定)'}"
+        )
+
+        def _worker() -> None:
+            ok, msg = send_google_chat(url, f"ウォッチャー発火: {w.title}", body)
+            if not ok:
+                self.log_message.emit(f"⚠ Google Chat 通知失敗: {msg}")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     @staticmethod
     def _fmt_eval(w: PcWatcher, r) -> str:
@@ -498,6 +576,18 @@ class PcFlowRunner(QObject):
 
         try:
             while not self._stop_event.is_set():
+                # フローが「保存して反映」等で差し替えられたか検出
+                if self._flow is not None and self._flow is not flow:
+                    new_flow = self._flow
+                    last_fired = migrate_last_fired(flow, new_flow, last_fired)
+                    poll = max(0.5, new_flow.settings.polling_interval_s)
+                    self._log(
+                        f"フロー再ロード反映: {new_flow.name} "
+                        f"({len(new_flow.schedule)} エントリ, 発火継承 {len(last_fired)} 件)"
+                    )
+                    flow = new_flow
+                    self._emit_next_schedule()
+
                 # 発火が溜まっていれば最初に処理（シーン外でも反応）
                 fired = self._pop_fired()
                 if fired:
@@ -513,9 +603,29 @@ class PcFlowRunner(QObject):
                 result = check_schedule(flow, datetime.now(), last_fired)
                 if result is not None:
                     idx, entry = result
-                    last_fired[idx] = datetime.now().date()
-                    scenes = entry_scenes(entry)
-                    self._log(f"スケジュール発火: {entry.time} → {scenes}")
+                    today = datetime.now().date()
+                    last_fired[idx] = today
+                    scenes = list(entry_scenes(entry))
+                    # 直後に続く seq エントリのシーンを連結（disabled はスキップ）
+                    chained: list[str] = []
+                    j = idx + 1
+                    while j < len(flow.schedule):
+                        nxt = flow.schedule[j]
+                        if not nxt.seq:
+                            break
+                        last_fired[j] = today
+                        if nxt.enabled:
+                            ns = entry_scenes(nxt)
+                            scenes.extend(ns)
+                            chained.extend(ns)
+                        j += 1
+                    if chained:
+                        self._log(
+                            f"スケジュール発火: {entry.time} → "
+                            f"{entry_scenes(entry)} + 続けて {chained}"
+                        )
+                    else:
+                        self._log(f"スケジュール発火: {entry.time} → {scenes}")
                     if not self._run_scenes_with_watcher(scenes):
                         # stop アクションが発火
                         break

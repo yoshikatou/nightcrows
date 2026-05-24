@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from .flow import load_flow
 from .flow_runner import replay_flow
 from .maintenance import load_maintenance
-from .notify import show_desktop_alert
+from .notify import send_google_chat_async, show_desktop_alert
 
 FLOWS_DIR = "flows"
 LOG_DIR = "logs"
@@ -87,6 +87,33 @@ class RunnerWidget(QWidget):
             self._log(f"グローバルウォッチャー: {len(global_watchers)} 件")
         flow.watchers = global_watchers + flow.watchers
 
+        # 現在のアプリ設定から Google Chat の Webhook を拾う
+        webhook = ""
+        try:
+            webhook = (getattr(self._mw, "settings", None).google_chat_webhook or "").strip()
+        except Exception:
+            webhook = ""
+
+        flow_name = flow.name
+        device_label = serial
+
+        def _notify(title: str, body: str) -> None:
+            # デスクトップ通知（従来通り）
+            show_desktop_alert(title, body)
+            # Google Chat（設定があれば非同期）
+            if webhook:
+                full_body = (
+                    f"{body or '(本文なし)'}\n"
+                    f"フロー: {flow_name}\n"
+                    f"デバイス: {device_label}"
+                )
+                send_google_chat_async(
+                    webhook, title, full_body,
+                    on_done=lambda ok, msg: (
+                        None if ok else self.log_signal.emit(f"⚠ Google Chat 通知失敗: {msg}")
+                    ),
+                )
+
         def run() -> None:
             try:
                 replay_flow(
@@ -94,7 +121,7 @@ class RunnerWidget(QWidget):
                     log=self._log,
                     should_stop=self.flow_stop.is_set,
                     maintenance=maintenance,
-                    notify_fn=show_desktop_alert,
+                    notify_fn=_notify,
                 )
             except Exception as e:
                 self._log(f"エラー: {e}")

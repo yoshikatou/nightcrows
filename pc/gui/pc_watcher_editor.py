@@ -6,7 +6,7 @@
        → 領域を watcher_templates/<watcher_id>.png として切り出し保存
        → 領域比率を condition.region に保存
     3. 閾値・優先度・冷却時間などを設定
-    4. 「現在のスクショで判定」で1回テスト
+    4. 「いまの画面で判定」で1回テスト（押した瞬間にウィンドウを撮り直して評価）
     5. 「連続監視テスト」で実機動作確認（発火するまで監視ループ）
     6. 「保存」で watchers/<title>_<id>.json に書き出し
 """
@@ -279,7 +279,7 @@ class WatcherEditorWindow(QWidget):
         rlay.addSpacing(6)
         rlay.addWidget(QLabel("テスト:"))
         test_row = QHBoxLayout()
-        self._btn_once = QPushButton("現在のスクショで判定")
+        self._btn_once = QPushButton("いまの画面で判定")
         self._btn_once.clicked.connect(self._test_once)
         self._btn_watch = QPushButton("▶ 監視開始")
         self._btn_watch.clicked.connect(self._toggle_watch)

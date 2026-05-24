@@ -32,6 +32,8 @@ class AppSettings:
     last_device: str = ""     # 最後に接続成功したデバイスの IP / USB シリアル
     last_flow: str = ""       # 最後に開いたフローのパス
     recording: RecordingSettings = field(default_factory=RecordingSettings)
+    # Google Chat Incoming Webhook URL（空 = 通知無効）
+    google_chat_webhook: str = ""
 
 
 def _default_settings() -> AppSettings:
@@ -108,6 +110,7 @@ def load_settings(path: str = SETTINGS_PATH) -> AppSettings:
         last_device=data.get("last_device", ""),
         last_flow=_to_absolute_path(data.get("last_flow", "")),
         recording=recording,
+        google_chat_webhook=data.get("google_chat_webhook", ""),
     )
 
 
@@ -127,6 +130,7 @@ def save_settings(s: AppSettings, path: str = SETTINGS_PATH) -> None:
             "auto_delete_enabled": r.auto_delete_enabled,
             "auto_delete_days": r.auto_delete_days,
         },
+        "google_chat_webhook": s.google_chat_webhook,
     }
     out_dir = os.path.dirname(path)
     if out_dir:

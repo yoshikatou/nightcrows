@@ -14,23 +14,30 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter
+from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QPainter
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -51,10 +58,13 @@ from .pc_flow import (
     load_pc_flow,
 )
 from .pc_flow_editor import FlowEditorWindow
-from .pc_scene import SCENES_DIR
+from .pc_scene import SCENES_DIR, load_pc_scene
 from .pc_scene_editor import SceneEditorWindow
 from .pc_watcher import WATCHERS_DIR, load_pc_watcher, save_pc_watcher
 from .pc_watcher_editor import WatcherEditorWindow
+from .notify import send_google_chat
+from .recorder import RECORDINGS_DIR, WindowRecorder
+from .widgets import ReorderableListWidget
 from .settings import load_settings, save_settings
 from .tesseract import apply_path as apply_tesseract_path, detect_tesseract
 from .window_picker import WindowPickerDialog, find_hwnd_by_title
@@ -111,8 +121,26 @@ class PcFlowWindow(QWidget):
         self._tabs.addTab(self._build_tab_test(),    "テスト")
         self._tabs.addTab(self._build_tab_watcher(), "見張り")
         self._tabs.addTab(self._build_tab_editor(),  "作成")
+        self._tabs.addTab(self._build_tab_record(),  "録画")
         self._tabs.addTab(self._build_tab_log(),     "ログ")
         outer.addWidget(self._tabs, 1)
+
+        # 下部: 設定・終了ボタン
+        quit_row = QHBoxLayout()
+        btn_settings = QPushButton("⚙ 設定")
+        btn_settings.setFixedWidth(90)
+        btn_settings.setToolTip("Google Chat 通知の Webhook 設定など")
+        btn_settings.clicked.connect(self._open_settings)
+        quit_row.addWidget(btn_settings)
+        quit_row.addStretch(1)
+        btn_quit = QPushButton("✕ 終了")
+        btn_quit.setFixedWidth(90)
+        btn_quit.setToolTip(
+            "メインウィンドウと開いている編集ウィンドウを全て閉じる"
+        )
+        btn_quit.clicked.connect(self.close)
+        quit_row.addWidget(btn_quit)
+        outer.addLayout(quit_row)
 
         # テストタブは Pico 接続時のみ有効
         self._set_test_enabled(False)
@@ -416,9 +444,13 @@ class PcFlowWindow(QWidget):
         lay.setContentsMargins(6, 8, 6, 6)
         lay.setSpacing(6)
 
-        lay.addWidget(QLabel("シーン一覧:"))
-        self._list_scenes = QListWidget()
+        lay.addWidget(QLabel("シーン一覧（ドラッグで並べ替え可・使わないものは下へ）:"))
+        self._list_scenes = ReorderableListWidget()
+        self._list_scenes.setDragDropMode(QAbstractItemView.InternalMove)
+        self._list_scenes.setDefaultDropAction(Qt.MoveAction)
+        self._list_scenes.setSelectionMode(QAbstractItemView.SingleSelection)
         self._list_scenes.itemDoubleClicked.connect(lambda _i: self._open_scene_editor())
+        self._list_scenes.rows_reordered.connect(self._on_scenes_reordered)
         lay.addWidget(self._list_scenes, 1)
 
         btn_row = QHBoxLayout()
@@ -454,15 +486,86 @@ class PcFlowWindow(QWidget):
         return w
 
     # ---- シーン一覧の操作（作成タブ）
-    def _reload_scenes_list(self) -> None:
-        self._list_scenes.clear()
+    _SCENE_ORDER_FILE = "_order.json"  # SCENES_DIR 配下に置く（"_" 始まりは一覧から除外）
+
+    def _scene_order_path(self) -> str:
+        return os.path.join(SCENES_DIR, self._SCENE_ORDER_FILE)
+
+    def _load_scene_order(self) -> list[str]:
+        path = self._scene_order_path()
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+        except Exception as e:
+            self._append_log(f"⚠ シーン並び順読込失敗: {e}")
+        return []
+
+    def _save_scene_order(self, order: list[str]) -> None:
+        os.makedirs(SCENES_DIR, exist_ok=True)
+        try:
+            with open(self._scene_order_path(), "w", encoding="utf-8") as f:
+                json.dump(order, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._append_log(f"⚠ シーン並び順保存失敗: {e}")
+
+    def _ordered_scene_files(self) -> list[str]:
+        """カスタム順序 → 残りはアルファベット順、で .json ファイル名を返す。
+
+        '_' で始まるファイル（_order.json など内部用）は除外する。
+        """
         if not os.path.isdir(SCENES_DIR):
-            return
-        for fname in sorted(os.listdir(SCENES_DIR)):
-            if fname.endswith(".json"):
-                item = QListWidgetItem(fname)
-                item.setData(Qt.UserRole, os.path.join(SCENES_DIR, fname))
+            return []
+        existing = sorted(
+            f for f in os.listdir(SCENES_DIR)
+            if f.endswith(".json") and not f.startswith("_")
+        )
+        existing_set = set(existing)
+        out: list[str] = []
+        seen: set[str] = set()
+        for fname in self._load_scene_order():
+            if fname in existing_set and fname not in seen:
+                out.append(fname)
+                seen.add(fname)
+        for fname in existing:
+            if fname not in seen:
+                out.append(fname)
+        return out
+
+    def _reload_scenes_list(self) -> None:
+        # rows_reordered と循環しないよう一旦シグナル停止
+        self._list_scenes.blockSignals(True)
+        try:
+            self._list_scenes.clear()
+            for fname in self._ordered_scene_files():
+                path = os.path.join(SCENES_DIR, fname)
+                # flow_target を読んで一覧表示のマークを切替
+                try:
+                    is_target = bool(load_pc_scene(path).flow_target)
+                except Exception:
+                    is_target = True  # 読めなければ安全側（候補扱い）
+                mark = "🏁" if is_target else "🧩"
+                item = QListWidgetItem(f"{mark} {fname}")
+                item.setData(Qt.UserRole, path)
+                if not is_target:
+                    # 部品シーンはグレー文字で控えめに
+                    item.setForeground(QBrush(QColor(140, 140, 140)))
                 self._list_scenes.addItem(item)
+        finally:
+            self._list_scenes.blockSignals(False)
+
+    def _on_scenes_reordered(self) -> None:
+        # 表示文字列はマーク付きなので、Qt.UserRole に持たせたフルパスから
+        # basename を取ってファイル名で並び順を保存する
+        order: list[str] = []
+        for i in range(self._list_scenes.count()):
+            path = self._list_scenes.item(i).data(Qt.UserRole)
+            if path:
+                order.append(os.path.basename(path))
+        self._save_scene_order(order)
 
     def _selected_scene_path(self) -> str | None:
         item = self._list_scenes.currentItem()
@@ -509,20 +612,48 @@ class PcFlowWindow(QWidget):
             self._flow_editors: list[FlowEditorWindow] = []
         win = FlowEditorWindow(path)
         win.saved.connect(self._on_flow_saved)
+        win.applied.connect(self._on_flow_applied)
         win.closed.connect(self._on_flow_editor_closed)
         self._flow_editors.append(win)
         win.show()
 
     def _on_flow_saved(self, path: str) -> None:
-        # 一覧を更新し、もし選択中のフローが上書きされたら再ロード
+        # 一覧を更新（ファイル保存のみ。実行中ランナーには触れない方針）
+        # 選択中のフローが上書きされた場合でも、実行中なら旧スケジュールが走り続ける。
+        # 即時反映が欲しい場合は編集側の「保存して反映」ボタンを使う。
+        self._load_flows_list()
+        if not self._runner.is_running:
+            cur = self._combo_flow.currentData()
+            if cur and os.path.basename(path) == cur:
+                try:
+                    flow = self._runner.load_flow(os.path.join(FLOWS_DIR, cur))
+                    self._update_schedule_list(flow.schedule)
+                except Exception as e:
+                    self._append_log(f"フロー再ロード失敗: {e}")
+
+    def _on_flow_applied(self, path: str) -> None:
+        """編集側「保存して反映」: 実行中でも即時にランナーへ反映する。"""
         self._load_flows_list()
         cur = self._combo_flow.currentData()
-        if cur and os.path.basename(path) == cur:
-            try:
-                flow = self._runner.load_flow(os.path.join(FLOWS_DIR, cur))
-                self._update_schedule_list(flow.schedule)
-            except Exception as e:
-                self._append_log(f"フロー再ロード失敗: {e}")
+        if not cur or os.path.basename(path) != cur:
+            self._append_log(
+                f"⚠ 「保存して反映」: 現在選択中のフローと違うため反映スキップ "
+                f"({os.path.basename(path)})"
+            )
+            return
+        try:
+            flow = self._runner.load_flow(os.path.join(FLOWS_DIR, cur))
+            self._update_schedule_list(flow.schedule)
+            if self._runner.is_running:
+                self._append_log(
+                    f"フロー反映 (実行中: 次のチェックから新定義): {flow.name}"
+                )
+            else:
+                self._append_log(
+                    f"フロー反映 (待機中: 次回開始から新定義): {flow.name}"
+                )
+        except Exception as e:
+            self._append_log(f"フロー反映失敗: {e}")
 
     def _on_flow_editor_closed(self, win) -> None:
         if hasattr(self, "_flow_editors") and win in self._flow_editors:
@@ -647,6 +778,146 @@ class PcFlowWindow(QWidget):
             return
         self._reload_watchers_list()
 
+    # ---- 録画タブ
+    def _build_tab_record(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 8, 6, 6)
+        lay.setSpacing(8)
+
+        # コントロール
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(QLabel("FPS:"))
+        self._spin_rec_fps = QDoubleSpinBox()
+        self._spin_rec_fps.setRange(0.5, 10.0)
+        self._spin_rec_fps.setSingleStep(0.5)
+        self._spin_rec_fps.setDecimals(1)
+        self._spin_rec_fps.setValue(2.0)
+        self._spin_rec_fps.setFixedWidth(70)
+        self._spin_rec_fps.setToolTip(
+            "推奨 2 fps（一晩でも数百MB級）。動きを細かく追いたい場合は上げる"
+        )
+        ctrl_row.addWidget(self._spin_rec_fps)
+        ctrl_row.addStretch(1)
+        self._btn_rec = QPushButton("⏺ 録画開始")
+        self._btn_rec.clicked.connect(self._toggle_record)
+        ctrl_row.addWidget(self._btn_rec)
+        lay.addLayout(ctrl_row)
+
+        self._lbl_rec_status = QLabel("待機中")
+        self._lbl_rec_status.setStyleSheet("color:#555; font-size:12px;")
+        self._lbl_rec_status.setWordWrap(True)
+        lay.addWidget(self._lbl_rec_status)
+
+        lay.addWidget(QLabel("録画ファイル:"))
+        self._list_rec = QListWidget()
+        self._list_rec.setStyleSheet("font-size:11px;")
+        lay.addWidget(self._list_rec, 1)
+
+        btn_row = QHBoxLayout()
+        btn_open = QPushButton("フォルダを開く")
+        btn_open.clicked.connect(self._open_recordings_dir)
+        btn_refresh = QPushButton("一覧更新")
+        btn_refresh.clicked.connect(self._reload_recordings)
+        btn_row.addWidget(btn_open)
+        btn_row.addWidget(btn_refresh)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+
+        hint = QLabel(
+            "フェーズ1: 録画のみ。録画ファイルからフレーム切り出して"
+            "ウォッチャー/シーンに使う UI は次フェーズで実装予定。"
+            "1 時間ごとに自動分割されます。"
+        )
+        hint.setStyleSheet("color:#666; font-size:11px;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        # 録画ワーカー本体
+        self._recorder = WindowRecorder()
+        self._recorder.started.connect(self._on_record_started)
+        self._recorder.stopped.connect(self._on_record_stopped)
+        self._recorder.file_rotated.connect(self._on_record_rotated)
+        self._recorder.stats_updated.connect(self._on_record_stats)
+        self._recorder.error_occurred.connect(self._on_record_error)
+
+        self._reload_recordings()
+        return w
+
+    def _toggle_record(self) -> None:
+        if self._recorder.is_recording:
+            self._recorder.stop()
+            return
+        title = self._settings.get("window_title", "")
+        hwnd = find_hwnd_by_title(title) if title else None
+        if not hwnd:
+            self._append_log(f"⚠ 録画: ウィンドウが見つかりません: {title!r}")
+            return
+        self._recorder.start(hwnd, fps=float(self._spin_rec_fps.value()))
+
+    def _on_record_started(self, path: str) -> None:
+        self._btn_rec.setText("⏹ 停止")
+        self._btn_rec.setStyleSheet(
+            "QPushButton{background:#c62828;color:white;font-weight:bold;}"
+        )
+        self._lbl_rec_status.setText(f"録画中… {os.path.basename(path)}")
+        self._append_log(f"録画開始: {path}")
+        self._reload_recordings()
+
+    def _on_record_stopped(self) -> None:
+        self._btn_rec.setText("⏺ 録画開始")
+        self._btn_rec.setStyleSheet("")
+        self._lbl_rec_status.setText("待機中")
+        self._append_log("録画停止")
+        self._reload_recordings()
+
+    def _on_record_rotated(self, path: str) -> None:
+        self._append_log(f"録画分割 → {os.path.basename(path)}")
+        self._reload_recordings()
+
+    def _on_record_stats(self, frames: int, elapsed: float) -> None:
+        cur = self._recorder.current_path
+        name = os.path.basename(cur) if cur else "(?)"
+        size_mb = 0.0
+        if cur and os.path.exists(cur):
+            try:
+                size_mb = os.path.getsize(cur) / (1024 * 1024)
+            except OSError:
+                size_mb = 0.0
+        hh = int(elapsed // 3600)
+        mm = int((elapsed % 3600) // 60)
+        ss = int(elapsed % 60)
+        self._lbl_rec_status.setText(
+            f"録画中… {name}   {frames} フレーム  "
+            f"{hh:02d}:{mm:02d}:{ss:02d}  {size_mb:.1f} MB"
+        )
+
+    def _on_record_error(self, msg: str) -> None:
+        self._append_log(f"⚠ {msg}")
+        self._lbl_rec_status.setText(f"⚠ {msg}")
+
+    def _reload_recordings(self) -> None:
+        self._list_rec.clear()
+        if not os.path.isdir(RECORDINGS_DIR):
+            return
+        for fname in sorted(os.listdir(RECORDINGS_DIR), reverse=True):
+            if not fname.lower().endswith(".mp4"):
+                continue
+            path = os.path.join(RECORDINGS_DIR, fname)
+            try:
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                self._list_rec.addItem(f"{fname}   {size_mb:.1f} MB")
+            except OSError:
+                self._list_rec.addItem(fname)
+
+    def _open_recordings_dir(self) -> None:
+        os.makedirs(RECORDINGS_DIR, exist_ok=True)
+        abspath = os.path.abspath(RECORDINGS_DIR)
+        try:
+            os.startfile(abspath)  # noqa: S606 — Windows のみ
+        except Exception as e:
+            self._append_log(f"⚠ フォルダオープン失敗: {e}")
+
     # ---- ログタブ
     def _build_tab_log(self) -> QWidget:
         w = QWidget()
@@ -728,6 +999,23 @@ class PcFlowWindow(QWidget):
                     self._combo_flow.setCurrentIndex(i)
                     break
 
+        # 通知設定をランナーへ
+        self._runner.set_notify_webhook(
+            self._settings.get("google_chat_webhook", "") or ""
+        )
+
+    # ---------------------------------------------------------------- 設定ダイアログ
+    def _open_settings(self) -> None:
+        dlg = _SettingsDialog(self._settings, self)
+        if dlg.exec():
+            self._settings.update(dlg.result_settings())
+            save_settings(self._settings)
+            # 即時反映
+            self._runner.set_notify_webhook(
+                self._settings.get("google_chat_webhook", "") or ""
+            )
+            self._append_log("設定を保存しました")
+
     # ---------------------------------------------------------------- フロー一覧
     def _load_flows_list(self) -> None:
         self._combo_flow.blockSignals(True)
@@ -786,41 +1074,70 @@ class PcFlowWindow(QWidget):
             self._lbl_day.setStyleSheet("font-weight:bold; color:#555;")
 
     def _refresh_day_list(self) -> None:
-        """現在の `_displayed_weekday` に該当するエントリだけ並べる。"""
+        """現在の `_displayed_weekday` に該当するエントリだけ並べる。
+
+        seq エントリは時刻を持たないので、直前の時刻エントリの直後に "→ シーン名" として
+        並べる（schedule リスト順に依存）。
+        """
         self._list_sched.clear()
         flow = self._runner._flow
         if not flow:
             return
         wd = self._displayed_weekday
-        matched: list = []
+
+        # schedule の順序を維持したまま「この曜日に該当する単位」を組み立てる。
+        # 1 単位 = 時刻エントリ + 直後に続く seq エントリ群
+        units: list[tuple[object, list[object]]] = []   # (parent_entry, [seq...])
+        cur_parent = None
+        cur_seqs: list = []
         for entry in flow.schedule:
             if not entry.enabled:
                 continue
-            if entry.repeat == "daily":
-                matched.append(entry)
-            elif entry.repeat == "weekly":
-                if not entry.days or wd in entry.days:
-                    matched.append(entry)
-            elif entry.repeat == "once":
+            if entry.seq:
+                if cur_parent is not None:
+                    cur_seqs.append(entry)
+                continue
+            # 通常エントリ: 直前のユニットを確定
+            if cur_parent is not None:
+                units.append((cur_parent, cur_seqs))
+            cur_parent = entry
+            cur_seqs = []
+        if cur_parent is not None:
+            units.append((cur_parent, cur_seqs))
+
+        # 曜日フィルタ
+        def _matches(e) -> bool:
+            if e.repeat == "daily":
+                return True
+            if e.repeat == "weekly":
+                return (not e.days) or (wd in e.days)
+            if e.repeat == "once":
                 try:
-                    d = datetime.strptime(entry.date, "%Y-%m-%d").date()
-                    if d.weekday() == wd:
-                        matched.append(entry)
+                    d = datetime.strptime(e.date, "%Y-%m-%d").date()
+                    return d.weekday() == wd
                 except (ValueError, TypeError):
-                    pass
-        matched.sort(key=lambda e: e.time)
-        for entry in matched:
-            scenes = entry_scenes(entry)
-            name = os.path.splitext(scenes[0])[0] if scenes else entry.target
-            if entry.repeat == "weekly" and entry.days:
-                days_str = "・".join(DAY_NAMES[d] for d in entry.days)
-            elif entry.repeat == "daily":
+                    return False
+            return False
+
+        # 時刻順にソート
+        units = [(p, s) for p, s in units if _matches(p)]
+        units.sort(key=lambda u: u[0].time)
+        for parent, seqs in units:
+            scenes = entry_scenes(parent)
+            name = os.path.splitext(scenes[0])[0] if scenes else parent.target
+            if parent.repeat == "weekly" and parent.days:
+                days_str = "・".join(DAY_NAMES[d] for d in parent.days)
+            elif parent.repeat == "daily":
                 days_str = "毎日"
-            elif entry.repeat == "once":
-                days_str = entry.date
+            elif parent.repeat == "once":
+                days_str = parent.date
             else:
                 days_str = ""
-            self._list_sched.addItem(f"{entry.time}  {name}  ({days_str})")
+            self._list_sched.addItem(f"{parent.time}  {name}  ({days_str})")
+            for seq_entry in seqs:
+                ss = entry_scenes(seq_entry)
+                sname = os.path.splitext(ss[0])[0] if ss else seq_entry.target
+                self._list_sched.addItem(f"   → {sname}  (続けて)")
 
     # ---------------------------------------------------------------- ウィンドウ選択
     def _pick_window(self) -> None:
@@ -1198,12 +1515,101 @@ class PcFlowWindow(QWidget):
     # ---------------------------------------------------------------- 終了
     def closeEvent(self, e) -> None:  # noqa: N802
         self._runner.stop()
+        if hasattr(self, "_recorder"):
+            self._recorder.stop()
+        # 開いている編集ウィンドウを全て閉じる。
+        # close() が closed シグナル経由でメインの保持リストから自己除去するため、
+        # リスト変動を避けて list() でスナップショットしてから回す。
+        for attr in ("_scene_editors", "_watcher_editors", "_flow_editors"):
+            for win in list(getattr(self, attr, []) or []):
+                try:
+                    win.close()
+                except Exception:
+                    pass
+        if self._capture_overlay is not None:
+            try:
+                self._capture_overlay.close()
+            except Exception:
+                pass
         if self._mouse:
             try:
                 self._mouse.close()
             except Exception:
                 pass
         super().closeEvent(e)
+
+
+class _SettingsDialog(QDialog):
+    """設定ダイアログ。現状は Google Chat 通知のみ。"""
+
+    def __init__(self, settings: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("設定")
+        self.resize(520, 220)
+        self._initial = dict(settings)
+
+        lay = QVBoxLayout(self)
+
+        # Google Chat 通知
+        grp = QGroupBox("Google Chat 通知")
+        form = QFormLayout(grp)
+        self._inp_webhook = QLineEdit(settings.get("google_chat_webhook", "") or "")
+        self._inp_webhook.setPlaceholderText(
+            "https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
+        )
+        self._inp_webhook.setToolTip(
+            "Google Chat スペースの「アプリと連携」→「Webhook を追加」で発行した URL を貼り付け。"
+            "空欄なら通知無効。"
+        )
+        form.addRow("Webhook URL:", self._inp_webhook)
+
+        test_row = QHBoxLayout()
+        test_row.addStretch(1)
+        self._btn_test = QPushButton("テスト通知を送信")
+        self._btn_test.clicked.connect(self._on_test)
+        test_row.addWidget(self._btn_test)
+        form.addRow("", test_row)
+
+        self._lbl_test = QLabel("")
+        self._lbl_test.setWordWrap(True)
+        self._lbl_test.setStyleSheet("color:#555; font-size:11px;")
+        form.addRow("", self._lbl_test)
+
+        lay.addWidget(grp)
+
+        # OK / Cancel
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _on_test(self) -> None:
+        url = self._inp_webhook.text().strip()
+        if not url:
+            self._lbl_test.setStyleSheet("color:#c62828; font-size:11px;")
+            self._lbl_test.setText("⚠ Webhook URL を入力してください")
+            return
+        self._lbl_test.setStyleSheet("color:#555; font-size:11px;")
+        self._lbl_test.setText("送信中…")
+        QApplication.processEvents()
+        ok, msg = send_google_chat(
+            url,
+            "テスト通知",
+            "Nightcrows 自動化ツールからのテスト送信です。\n"
+            "この通知が見えていれば、Webhook 設定は正しく動いています。",
+        )
+        if ok:
+            self._lbl_test.setStyleSheet("color:#2e7d32; font-size:11px;")
+            self._lbl_test.setText(f"✓ 送信成功 ({msg})")
+        else:
+            self._lbl_test.setStyleSheet("color:#c62828; font-size:11px;")
+            self._lbl_test.setText(f"✗ 送信失敗: {msg}")
+
+    def result_settings(self) -> dict:
+        """OK 時に呼ばれて、変更されたキーを含む dict を返す。"""
+        return {
+            "google_chat_webhook": self._inp_webhook.text().strip(),
+        }
 
 
 class _ClickCaptureOverlay(QWidget):

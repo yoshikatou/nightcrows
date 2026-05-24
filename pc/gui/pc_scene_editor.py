@@ -21,8 +21,9 @@ from typing import Callable
 
 import cv2
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -50,6 +51,7 @@ from .pc_scene import (
     run_pc_scene,
     save_pc_scene,
 )
+from .widgets import ReorderableListWidget
 from .window_picker import find_hwnd_by_title
 
 SNAPSHOTS_DIR = "snapshots"
@@ -93,6 +95,12 @@ class SceneEditorWindow(QWidget):
 
         self._current_snapshot_path: str | None = None
 
+        # 位置再選択モード（対象行を保持。None=通常モード）
+        self._edit_pos_row: int | None = None
+
+        # call_scene 等から開いた子シーン編集ウィンドウ（自分が閉じる時にまとめて閉じる）
+        self._child_scene_editors: list["SceneEditorWindow"] = []
+
         # 実行スレッド管理
         self._mouse_provider = mouse_provider or (lambda: None)
         self._play_thread: threading.Thread | None = None
@@ -104,11 +112,25 @@ class SceneEditorWindow(QWidget):
         self._build_ui()
         self._refresh_steps()
 
+        # Esc: 位置編集モードの取消（子ウィジェットにフォーカスがあっても効くよう
+        # QShortcut で取る。keyPressEvent は子側にフォーカスが奪われると呼ばれない）
+        esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        esc.activated.connect(self._on_esc_shortcut)
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
+
+        # 位置再選択モードのバナー（通常は非表示）
+        self._edit_banner = QLabel("")
+        self._edit_banner.setStyleSheet(
+            "background:#fff59d; color:#5d4037; padding:6px 10px; "
+            "border:1px solid #fbc02d; border-radius:4px; font-weight:bold;"
+        )
+        self._edit_banner.setVisible(False)
+        outer.addWidget(self._edit_banner)
 
         # ヘッダー
         head = QHBoxLayout()
@@ -121,6 +143,15 @@ class SceneEditorWindow(QWidget):
         self._lbl_win = QLabel(self._scene.window_title or "(未設定)")
         head.addWidget(self._lbl_win)
         head.addStretch(1)
+        # フロー候補チェック：チェックなら「親シーン」、外すと他から呼ばれる「部品シーン」
+        self._chk_flow_target = QCheckBox("フロー候補")
+        self._chk_flow_target.setChecked(self._scene.flow_target)
+        self._chk_flow_target.setToolTip(
+            "フロー編集の対象シーン選択肢に出すかどうか。\n"
+            "チェック=エントリ用の親シーン / チェック外す=他シーンから呼ばれる部品シーン"
+        )
+        self._chk_flow_target.toggled.connect(self._on_flow_target_changed)
+        head.addWidget(self._chk_flow_target)
         btn_save = QPushButton("保存")
         btn_save.setFixedWidth(80)
         btn_save.clicked.connect(self._save)
@@ -169,8 +200,18 @@ class SceneEditorWindow(QWidget):
         rlay.addSpacing(8)
 
         rlay.addWidget(QLabel("ステップ一覧:"))
-        self._list_steps = QListWidget()
+        self._list_steps = ReorderableListWidget()
+        # ドラッグで並べ替え（行内のリオーダリング専用）
+        self._list_steps.setDragDropMode(QAbstractItemView.InternalMove)
+        self._list_steps.setDefaultDropAction(Qt.MoveAction)
+        self._list_steps.setSelectionMode(QAbstractItemView.SingleSelection)
         self._list_steps.itemSelectionChanged.connect(self._on_step_selected)
+        self._list_steps.itemDoubleClicked.connect(self._on_step_double_clicked)
+        self._list_steps.rows_reordered.connect(self._on_rows_reordered)
+        # DEL キーで選択行を削除（このリストにフォーカスがある時だけ反応）
+        del_sc = QShortcut(QKeySequence(Qt.Key_Delete), self._list_steps)
+        del_sc.setContext(Qt.WidgetShortcut)
+        del_sc.activated.connect(self._remove_step)
         rlay.addWidget(self._list_steps, 1)
 
         btn_row = QHBoxLayout()
@@ -178,10 +219,31 @@ class SceneEditorWindow(QWidget):
         btn_up.clicked.connect(lambda: self._move_step(-1))
         btn_dn = QPushButton("↓")
         btn_dn.clicked.connect(lambda: self._move_step(+1))
+        btn_edit = QPushButton("✏ 位置編集")
+        btn_edit.setToolTip(
+            "選択中ステップの位置（タップ座標 / 領域 / スワイプ両端）を"
+            "キャンバス上で再選択する"
+        )
+        btn_edit.clicked.connect(self._enter_edit_pos_mode)
+        btn_params = QPushButton("⚙ 値編集")
+        btn_params.setToolTip(
+            "選択中ステップの数値・テキスト系パラメータを編集"
+            "（待ち秒数・閾値・タイムアウト・キー名 など）"
+        )
+        btn_params.clicked.connect(self._edit_step_params)
+        btn_open_ref = QPushButton("📂 呼出し先")
+        btn_open_ref.setToolTip(
+            "選択中ステップが参照しているシーンを別ウィンドウで開く"
+            "（call_scene / pick_scene / if_image 対応）"
+        )
+        btn_open_ref.clicked.connect(self._open_referenced_scene)
         btn_del = QPushButton("削除")
         btn_del.clicked.connect(self._remove_step)
         btn_row.addWidget(btn_up)
         btn_row.addWidget(btn_dn)
+        btn_row.addWidget(btn_edit)
+        btn_row.addWidget(btn_params)
+        btn_row.addWidget(btn_open_ref)
         btn_row.addWidget(btn_del)
         rlay.addLayout(btn_row)
 
@@ -249,6 +311,9 @@ class SceneEditorWindow(QWidget):
 
     # ------------------------------------------------------- クリック → tap
     def _on_canvas_clicked(self, rx: float, ry: float) -> None:
+        if self._edit_pos_row is not None:
+            self._apply_edit_pos_click(rx, ry)
+            return
         self._scene.steps.append(PcStep(
             type="tap",
             params={"rx": round(rx, 4), "ry": round(ry, 4), "duration_ms": 50},
@@ -264,6 +329,9 @@ class SceneEditorWindow(QWidget):
 
     # ------------------------------------------------- ドラッグ → 領域メニュー
     def _on_canvas_region(self, rx: float, ry: float, rw: float, rh: float) -> None:
+        if self._edit_pos_row is not None:
+            self._apply_edit_pos_region(rx, ry, rw, rh)
+            return
         if self._current_snapshot_path is None:
             QMessageBox.warning(self, "エラー", "先にスクショを取得してください")
             return
@@ -342,6 +410,304 @@ class SceneEditorWindow(QWidget):
             ))
         self._refresh_steps()
         self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
+
+    # --------------------------------------------------- 位置再選択モード
+    # 対応タイプと、クリック / ドラッグのどちらを受けるか
+    _EDIT_POS_CLICK_TYPES  = {"tap"}
+    _EDIT_POS_REGION_TYPES = {"tap_image", "snapshot", "swipe", "scroll", "if_image"}
+
+    def _enter_edit_pos_mode(self) -> None:
+        row = self._list_steps.currentRow()
+        if row < 0 or row >= len(self._scene.steps):
+            self._append_run_log("⚠ ステップ未選択")
+            return
+        step = self._scene.steps[row]
+        if (
+            step.type not in self._EDIT_POS_CLICK_TYPES
+            and step.type not in self._EDIT_POS_REGION_TYPES
+        ):
+            self._append_run_log(
+                f"⚠ {step.type} は位置を持たないため位置編集できません"
+            )
+            return
+        # snapshot のうち、フル画面キャプチャ（snapshots/ 配下）は対象外
+        if step.type == "snapshot":
+            path = str(step.params.get("path", ""))
+            if not path.startswith(TEMPLATES_DIR):
+                self._append_run_log(
+                    "⚠ この snapshot はフル画面キャプチャ。位置編集はテンプレ画像のみ対応"
+                )
+                return
+        if self._current_snapshot_path is None:
+            QMessageBox.warning(
+                self, "エラー",
+                "対応する直前スクショが表示されていません",
+            )
+            return
+        self._edit_pos_row = row
+        self._update_edit_pos_banner()
+        self._canvas.setFocus()
+
+    def _cancel_edit_pos_mode(self) -> None:
+        if self._edit_pos_row is None:
+            return
+        self._edit_pos_row = None
+        self._update_edit_pos_banner()
+        self._append_run_log("位置編集を取消")
+
+    def _update_edit_pos_banner(self) -> None:
+        if self._edit_pos_row is None:
+            self._edit_banner.setVisible(False)
+            self._canvas.unsetCursor()
+            return
+        step = self._scene.steps[self._edit_pos_row]
+        hints = {
+            "tap":       "クリックで位置を更新",
+            "tap_image": "ドラッグで領域を更新（テンプレ画像を再切出し）",
+            "snapshot":  "ドラッグで領域を更新（テンプレ画像を再切出し）",
+            "swipe":     "ドラッグで開始 → 終了を更新",
+            "scroll":    "ドラッグで開始 → 終了を更新",
+            "if_image":  "ドラッグで領域を更新（テンプレ画像を再切出し）",
+        }
+        self._edit_banner.setText(
+            f"📍 #{self._edit_pos_row + 1} {step.type} の位置を再選択中…  "
+            f"{hints.get(step.type, '')}　[Esc で取消]"
+        )
+        self._edit_banner.setVisible(True)
+        self._canvas.setCursor(Qt.CrossCursor)
+
+    def _apply_edit_pos_click(self, rx: float, ry: float) -> None:
+        row = self._edit_pos_row
+        if row is None or row >= len(self._scene.steps):
+            self._cancel_edit_pos_mode()
+            return
+        step = self._scene.steps[row]
+        if step.type != "tap":
+            self._append_run_log(
+                f"⚠ {step.type} はドラッグで領域を選択してください（クリックは tap のみ）"
+            )
+            return
+        step.params["rx"] = round(rx, 4)
+        step.params["ry"] = round(ry, 4)
+        self._append_run_log(f"✓ #{row + 1} tap 位置を更新")
+        self._finish_edit_pos(row)
+
+    def _apply_edit_pos_region(
+        self, rx: float, ry: float, rw: float, rh: float,
+    ) -> None:
+        row = self._edit_pos_row
+        if row is None or row >= len(self._scene.steps):
+            self._cancel_edit_pos_mode()
+            return
+        step = self._scene.steps[row]
+        if step.type == "tap":
+            self._append_run_log("⚠ tap はクリック（ドラッグ不可）で位置を指定してください")
+            return
+        if step.type in ("swipe", "scroll"):
+            step.params["rx1"] = round(rx, 4)
+            step.params["ry1"] = round(ry, 4)
+            step.params["rx2"] = round(rx + rw, 4)
+            step.params["ry2"] = round(ry + rh, 4)
+            self._append_run_log(f"✓ #{row + 1} {step.type} 始終点を更新")
+            self._finish_edit_pos(row)
+            return
+        # tap_image / snapshot / if_image: テンプレを切り出し直す
+        if self._current_snapshot_path is None:
+            QMessageBox.warning(self, "エラー", "スナップ画像がありません")
+            return
+        img = cv2.imread(self._current_snapshot_path)
+        if img is None:
+            QMessageBox.warning(self, "エラー", "スナップ画像が読み込めません")
+            return
+        ih, iw = img.shape[:2]
+        x0 = max(0, int(rx * iw))
+        y0 = max(0, int(ry * ih))
+        x1 = min(iw, int((rx + rw) * iw))
+        y1 = min(ih, int((ry + rh) * ih))
+        crop = img[y0:y1, x0:x1]
+        if crop.size == 0:
+            QMessageBox.warning(self, "エラー", "領域サイズが小さすぎます")
+            return
+        scene_dir = os.path.join(TEMPLATES_DIR, self._scene.name or "scene")
+        os.makedirs(scene_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        tpl_path = os.path.join(scene_dir, f"tpl_{ts}.png").replace("\\", "/")
+        cv2.imwrite(tpl_path, crop)
+        if step.type == "snapshot":
+            step.params["path"] = tpl_path
+        else:  # tap_image / if_image
+            step.params["template"] = tpl_path
+        step.params["region"] = [
+            round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4),
+        ]
+        self._append_run_log(
+            f"✓ #{row + 1} {step.type} 領域＋テンプレを更新 ({os.path.basename(tpl_path)})"
+        )
+        self._finish_edit_pos(row)
+
+    def _finish_edit_pos(self, row: int) -> None:
+        self._edit_pos_row = None
+        self._update_edit_pos_banner()
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(row)
+
+    def _on_esc_shortcut(self) -> None:
+        if self._edit_pos_row is not None:
+            self._cancel_edit_pos_mode()
+
+    # --------------------------------------------------- ステップ値編集
+    _SCENE_REF_TYPES = {"call_scene", "pick_scene", "if_image"}
+
+    def _on_step_double_clicked(self, *_args) -> None:
+        """ダブルクリック振り分け:
+        - 位置を持つステップ → 位置編集モード
+        - シーン参照ステップ → 呼出し先を開く
+        - それ以外 → 値編集ダイアログ
+        """
+        row = self._list_steps.currentRow()
+        if row < 0 or row >= len(self._scene.steps):
+            return
+        step = self._scene.steps[row]
+        pos_types = self._EDIT_POS_CLICK_TYPES | self._EDIT_POS_REGION_TYPES
+        if step.type in pos_types:
+            self._enter_edit_pos_mode()
+        elif step.type in self._SCENE_REF_TYPES:
+            self._open_referenced_scene()
+        else:
+            self._edit_step_params()
+
+    def _open_referenced_scene(self) -> None:
+        """選択中ステップが参照するシーンを子編集ウィンドウで開く。"""
+        row = self._list_steps.currentRow()
+        if row < 0 or row >= len(self._scene.steps):
+            self._append_run_log("⚠ ステップ未選択")
+            return
+        step = self._scene.steps[row]
+        candidates: list[str] = []
+        if step.type == "call_scene":
+            s = str(step.params.get("scene", "")).strip()
+            if s:
+                candidates.append(s)
+        elif step.type == "pick_scene":
+            for s in step.params.get("scenes", []) or []:
+                s = str(s).strip()
+                if s:
+                    candidates.append(s)
+        elif step.type == "if_image":
+            for key in ("then_scene", "else_scene"):
+                s = str(step.params.get(key, "")).strip()
+                if s:
+                    candidates.append(s)
+        else:
+            self._append_run_log(
+                f"⚠ {step.type} はシーン参照を持ちません"
+            )
+            return
+        if not candidates:
+            self._append_run_log("⚠ 参照しているシーンがありません")
+            return
+        if len(candidates) == 1:
+            target = candidates[0]
+        else:
+            target, ok = QInputDialog.getItem(
+                self, "呼出し先を開く",
+                "編集するシーン:", candidates, 0, False,
+            )
+            if not ok:
+                return
+        self._open_child_scene(target)
+
+    def _open_child_scene(self, fname: str) -> None:
+        if not fname:
+            return
+        if not fname.endswith(".json"):
+            fname = f"{fname}.json"
+        path = os.path.join(SCENES_DIR, fname)
+        if not os.path.exists(path):
+            QMessageBox.warning(
+                self, "エラー", f"シーンが見つかりません: {fname}",
+            )
+            return
+        # 自分自身を再帰的に開く形になるが、別インスタンスなのでループはしない
+        win = SceneEditorWindow(
+            path,
+            window_title=self._scene.window_title,
+            mouse_provider=self._mouse_provider,
+        )
+        # 子の保存通知を自分の saved に流せば、最終的にメインの一覧更新まで届く
+        win.saved.connect(self.saved.emit)
+        win.closed.connect(self._on_child_scene_closed)
+        self._child_scene_editors.append(win)
+        win.show()
+        self._append_run_log(f"子シーン編集を開いた: {fname}")
+
+    def _on_child_scene_closed(self, win) -> None:
+        if win in self._child_scene_editors:
+            self._child_scene_editors.remove(win)
+
+    # ステップタイプ → 値編集ハンドラ。返り値 True で変更ありとして再描画
+    def _edit_step_params(self) -> None:
+        row = self._list_steps.currentRow()
+        if row < 0 or row >= len(self._scene.steps):
+            self._append_run_log("⚠ ステップ未選択")
+            return
+        step = self._scene.steps[row]
+        handlers = {
+            "wait_fixed":   self._edit_params_wait_fixed,
+            "keyevent":     self._edit_params_keyevent,
+            "group_header": self._edit_params_group_header,
+        }
+        h = handlers.get(step.type)
+        if h is None:
+            self._append_run_log(
+                f"⚠ {step.type} の値編集はまだ未対応"
+                "（位置/領域のみ ✏ で再選択可能）"
+            )
+            return
+        if h(step):
+            self._refresh_steps()
+            self._list_steps.setCurrentRow(row)
+
+    def _edit_params_wait_fixed(self, step: PcStep) -> bool:
+        cur = float(step.params.get("seconds", 1.0))
+        v, ok = QInputDialog.getDouble(
+            self, "待機秒数", "待機秒数:", cur, 0.1, 600.0, 1,
+        )
+        if not ok:
+            return False
+        step.params["seconds"] = v
+        return True
+
+    def _edit_params_keyevent(self, step: PcStep) -> bool:
+        key = str(step.params.get("key", ""))
+        new_key, ok = QInputDialog.getText(
+            self, "キー入力",
+            "キー名 (例: esc, enter, f5, a, space):", text=key,
+        )
+        if not ok:
+            return False
+        new_key = new_key.strip()
+        if not new_key:
+            return False
+        dur = int(step.params.get("duration_ms", 30))
+        new_dur, ok = QInputDialog.getInt(
+            self, "キー入力", "押下時間 (ms):", dur, 1, 5000, 10,
+        )
+        if not ok:
+            return False
+        step.params["key"] = new_key
+        step.params["duration_ms"] = new_dur
+        return True
+
+    def _edit_params_group_header(self, step: PcStep) -> bool:
+        cur = str(step.params.get("label", ""))
+        text, ok = QInputDialog.getText(
+            self, "見出し", "見出し文字列:", text=cur,
+        )
+        if not ok:
+            return False
+        step.params["label"] = text.strip()
+        return True
 
     def _add_wait_fixed(self) -> None:
         v, ok = QInputDialog.getDouble(
@@ -501,12 +867,48 @@ class SceneEditorWindow(QWidget):
     # ---------------------------------------------------------------- ステップ一覧
     def _refresh_steps(self) -> None:
         cur = self._list_steps.currentRow()
-        self._list_steps.clear()
-        for i, s in enumerate(self._scene.steps):
-            self._list_steps.addItem(QListWidgetItem(self._step_label(i, s)))
+        # ドラッグ並べ替えの rows_reordered と循環しないようシグナルを止める
+        self._list_steps.blockSignals(True)
+        try:
+            self._list_steps.clear()
+            for i, s in enumerate(self._scene.steps):
+                item = QListWidgetItem(self._step_label(i, s))
+                # 並べ替え後の照合用にステップオブジェクトの id を持たせる
+                item.setData(Qt.UserRole, id(s))
+                self._list_steps.addItem(item)
+        finally:
+            self._list_steps.blockSignals(False)
         if 0 <= cur < len(self._scene.steps):
             self._list_steps.setCurrentRow(cur)
         self._refresh_markers()
+
+    def _on_rows_reordered(self) -> None:
+        """ドラッグで行が動いた後、self._scene.steps を新しい順に組み直す。"""
+        id_to_step = {id(s): s for s in self._scene.steps}
+        new_steps: list[PcStep] = []
+        for i in range(self._list_steps.count()):
+            sid = self._list_steps.item(i).data(Qt.UserRole)
+            s = id_to_step.get(sid)
+            if s is not None:
+                new_steps.append(s)
+        if len(new_steps) != len(self._scene.steps):
+            # 想定外（紐づけが取れない行が混ざった）: 安全側に倒して描き直しのみ
+            self._refresh_steps()
+            return
+        # 移動前に選択していたステップを、移動後の行で再選択
+        cur_row = self._list_steps.currentRow()
+        cur_id = (
+            self._list_steps.item(cur_row).data(Qt.UserRole)
+            if 0 <= cur_row < self._list_steps.count()
+            else None
+        )
+        self._scene.steps = new_steps
+        self._refresh_steps()
+        if cur_id is not None:
+            for i, s in enumerate(self._scene.steps):
+                if id(s) == cur_id:
+                    self._list_steps.setCurrentRow(i)
+                    break
 
     def _step_label(self, i: int, s: PcStep) -> str:
         p = s.params
@@ -645,6 +1047,9 @@ class SceneEditorWindow(QWidget):
         if name:
             self._scene.name = name
 
+    def _on_flow_target_changed(self, checked: bool) -> None:
+        self._scene.flow_target = bool(checked)
+
     # ---------------------------------------------------------------- 実行
     def _append_run_log(self, msg: str) -> None:
         self._run_log.append(msg)
@@ -740,5 +1145,11 @@ class SceneEditorWindow(QWidget):
 
     def closeEvent(self, e) -> None:  # noqa: N802
         self._stop_flag = True
+        # 自分から開いた子シーン編集ウィンドウもまとめて閉じる
+        for win in list(self._child_scene_editors):
+            try:
+                win.close()
+            except Exception:
+                pass
         self.closed.emit(self)
         super().closeEvent(e)

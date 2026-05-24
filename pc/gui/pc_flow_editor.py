@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 
 from PySide6.QtCore import QDate, Qt, QTime, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -43,7 +45,7 @@ from .pc_flow import (
     load_pc_flow,
     save_pc_flow,
 )
-from .pc_scene import SCENES_DIR
+from .pc_scene import SCENES_DIR, load_pc_scene
 
 
 # ============================================================ 週間スケジュールテーブル
@@ -85,16 +87,22 @@ class _EntryDialog(QDialog):
         entry: ScheduleEntry,
         scenes_list: list[str],
         parent: QWidget | None = None,
+        mode: str = "normal",   # "normal" | "seq"（時刻指定 / 続けて実行）
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("スケジュールエントリ")
-        self.resize(420, 320)
+        self._mode = mode
+        if mode == "seq":
+            self.setWindowTitle("続けて実行エントリ")
+            self.resize(420, 200)
+        else:
+            self.setWindowTitle("スケジュールエントリ")
+            self.resize(420, 320)
         self.entry = entry   # 編集中のインスタンス（OK 時に書き戻し）
 
         lay = QVBoxLayout(self)
         form = QFormLayout()
 
-        # 時刻
+        # 時刻 (normal のみ表示)
         self._te_time = QTimeEdit()
         self._te_time.setDisplayFormat("HH:mm")
         try:
@@ -102,7 +110,14 @@ class _EntryDialog(QDialog):
             self._te_time.setTime(QTime(h, m))
         except (ValueError, AttributeError):
             self._te_time.setTime(QTime(12, 0))
-        form.addRow("時刻:", self._te_time)
+        if mode == "normal":
+            form.addRow("時刻:", self._te_time)
+        else:
+            # seq モードでは説明だけ示し、time は元値を維持
+            note = QLabel("直前の時刻エントリ終了後にすぐ実行されます")
+            note.setStyleSheet("color:#1565c0; font-size:11px;")
+            note.setWordWrap(True)
+            form.addRow("実行タイミング:", note)
 
         # シーン
         self._cmb_scene = QComboBox()
@@ -114,8 +129,7 @@ class _EntryDialog(QDialog):
             self._cmb_scene.setCurrentIndex(idx)
         form.addRow("シーン:", self._cmb_scene)
 
-        # 繰り返し
-        rep_row = QHBoxLayout()
+        # 繰り返し / 曜日 / 日付 は normal モードのみ
         self._rb_daily  = QRadioButton("毎日")
         self._rb_weekly = QRadioButton("週次")
         self._rb_once   = QRadioButton("1回限り")
@@ -129,23 +143,13 @@ class _EntryDialog(QDialog):
             self._rb_once.setChecked(True)
         else:
             self._rb_daily.setChecked(True)
-        rep_row.addWidget(self._rb_daily)
-        rep_row.addWidget(self._rb_weekly)
-        rep_row.addWidget(self._rb_once)
-        rep_row.addStretch(1)
-        form.addRow("繰り返し:", rep_row)
 
-        # 曜日（weekly のとき有効）
-        day_row = QHBoxLayout()
         self._chk_days: list[QCheckBox] = []
         for i, name in enumerate(DAY_NAMES):
             chk = QCheckBox(name)
             chk.setChecked(i in (entry.days or []))
             self._chk_days.append(chk)
-            day_row.addWidget(chk)
-        form.addRow("曜日:", day_row)
 
-        # 日付（once のとき有効）
         self._de_date = QDateEdit()
         self._de_date.setDisplayFormat("yyyy-MM-dd")
         try:
@@ -153,7 +157,19 @@ class _EntryDialog(QDialog):
             self._de_date.setDate(QDate(d.year, d.month, d.day))
         except (ValueError, TypeError, AttributeError):
             self._de_date.setDate(QDate.currentDate())
-        form.addRow("日付:", self._de_date)
+
+        if mode == "normal":
+            rep_row = QHBoxLayout()
+            rep_row.addWidget(self._rb_daily)
+            rep_row.addWidget(self._rb_weekly)
+            rep_row.addWidget(self._rb_once)
+            rep_row.addStretch(1)
+            form.addRow("繰り返し:", rep_row)
+            day_row = QHBoxLayout()
+            for chk in self._chk_days:
+                day_row.addWidget(chk)
+            form.addRow("曜日:", day_row)
+            form.addRow("日付:", self._de_date)
 
         # 有効
         self._chk_enabled = QCheckBox("有効")
@@ -169,18 +185,23 @@ class _EntryDialog(QDialog):
         lay.addWidget(bb)
 
     def _on_ok(self) -> None:
-        self.entry.time = self._te_time.time().toString("HH:mm")
         self.entry.target = self._cmb_scene.currentData() or ""
-        if self._rb_weekly.isChecked():
-            self.entry.repeat = "weekly"
-            self.entry.days = [i for i, c in enumerate(self._chk_days) if c.isChecked()]
-        elif self._rb_once.isChecked():
-            self.entry.repeat = "once"
-            self.entry.date = self._de_date.date().toString("yyyy-MM-dd")
-        else:
-            self.entry.repeat = "daily"
-            self.entry.days = []
         self.entry.enabled = self._chk_enabled.isChecked()
+        if self._mode == "seq":
+            # seq では time/repeat/days/date は使われないが、念のため明示
+            self.entry.seq = True
+        else:
+            self.entry.seq = False
+            self.entry.time = self._te_time.time().toString("HH:mm")
+            if self._rb_weekly.isChecked():
+                self.entry.repeat = "weekly"
+                self.entry.days = [i for i, c in enumerate(self._chk_days) if c.isChecked()]
+            elif self._rb_once.isChecked():
+                self.entry.repeat = "once"
+                self.entry.date = self._de_date.date().toString("yyyy-MM-dd")
+            else:
+                self.entry.repeat = "daily"
+                self.entry.days = []
         self.accept()
 
 
@@ -189,8 +210,9 @@ class FlowEditorWindow(QWidget):
     """週間スケジュールテーブル形式のフロー編集ウィンドウ。"""
 
     SLOTS = 48      # 00:00〜23:30 を 30 分刻みで 48 行
-    saved  = Signal(str)
-    closed = Signal(object)
+    saved   = Signal(str)
+    applied = Signal(str)   # 「保存して反映」: メインで即時 reload を依頼
+    closed  = Signal(object)
 
     def __init__(self, flow_path: str | None) -> None:
         super().__init__(None)
@@ -241,8 +263,18 @@ class FlowEditorWindow(QWidget):
         head.addStretch(1)
         btn_save = QPushButton("保存")
         btn_save.setFixedWidth(80)
+        btn_save.setToolTip("ファイルに保存のみ。実行中ランナーには反映されません")
         btn_save.clicked.connect(self._save)
         head.addWidget(btn_save)
+        btn_save_apply = QPushButton("保存して反映")
+        btn_save_apply.setFixedWidth(120)
+        btn_save_apply.setToolTip(
+            "保存後、メインで選択中のフローと同じならランナーへ即時反映します。\n"
+            "実行中なら次のスケジュールチェックから新しい定義で動きます。"
+        )
+        btn_save_apply.setStyleSheet("font-weight:bold;")
+        btn_save_apply.clicked.connect(self._save_and_apply)
+        head.addWidget(btn_save_apply)
         outer.addLayout(head)
 
         # テーブル（QTableWidget サブクラス: 現在時刻の赤線を描画）
@@ -285,6 +317,37 @@ class FlowEditorWindow(QWidget):
         hint.setStyleSheet("color:#666; font-size:11px;")
         outer.addWidget(hint)
 
+        # ---- 続けて実行（seq エントリ）パネル
+        seq_head = QHBoxLayout()
+        seq_head.addWidget(QLabel("続けて実行（時刻指定エントリ完了後に連鎖実行）:"))
+        seq_head.addStretch(1)
+        btn_seq_new = QPushButton("+ 続けて実行追加")
+        btn_seq_new.setToolTip(
+            "選択中の時刻エントリの直後に「続けて実行」エントリを追加します。\n"
+            "テーブルでセルを選択してから押してください。"
+        )
+        btn_seq_new.clicked.connect(self._add_seq_entry)
+        seq_head.addWidget(btn_seq_new)
+        btn_seq_edit = QPushButton("編集…")
+        btn_seq_edit.clicked.connect(self._edit_selected_seq)
+        seq_head.addWidget(btn_seq_edit)
+        btn_seq_del = QPushButton("削除")
+        btn_seq_del.clicked.connect(self._delete_selected_seq)
+        seq_head.addWidget(btn_seq_del)
+        outer.addLayout(seq_head)
+
+        self._seq_list = QListWidget()
+        self._seq_list.setStyleSheet("font-size:12px;")
+        self._seq_list.setMaximumHeight(140)
+        self._seq_list.itemDoubleClicked.connect(
+            lambda *_: self._edit_selected_seq()
+        )
+        # DEL キーで削除
+        sc_del = QShortcut(QKeySequence(Qt.Key_Delete), self._seq_list)
+        sc_del.setContext(Qt.WidgetShortcut)
+        sc_del.activated.connect(self._delete_selected_seq)
+        outer.addWidget(self._seq_list)
+
     # ------------------------------------------------------- テーブル描画
     _BG_TODAY = QColor("#fff9c4")    # 今日の曜日列の背景（薄黄）
 
@@ -308,8 +371,10 @@ class FlowEditorWindow(QWidget):
             item = QTableWidgetItem("")
             item.setBackground(today_bg)
             self._table.setItem(r, today_wd, item)
-        # エントリを各曜日に展開
+        # エントリを各曜日に展開（seq エントリはテーブル外のリストに表示）
         for entry in self._flow.schedule:
+            if entry.seq:
+                continue
             row = self._time_to_row(entry.time)
             if row is None:
                 continue
@@ -335,6 +400,9 @@ class FlowEditorWindow(QWidget):
                 self._table.setItem(row, col, item)
         # ヘッダー強調も更新（日付跨ぎ時に正しい列が太字になるよう）
         self._apply_today_header_bold()
+        # 続けて実行リストも併せて更新
+        if hasattr(self, "_seq_list"):
+            self._refresh_seq_list()
 
     @staticmethod
     def _time_to_row(t: str) -> int | None:
@@ -430,11 +498,141 @@ class FlowEditorWindow(QWidget):
         self._flow.schedule.remove(match)
         self._refresh_table()
 
+    # ------------------------------------------------------- 続けて実行リスト
+    def _refresh_seq_list(self) -> None:
+        """schedule リスト中の seq エントリを表示し、直前の親エントリを併記する。"""
+        self._seq_list.clear()
+        parent_label = "(直前なし — 単独では実行されません)"
+        for idx, entry in enumerate(self._flow.schedule):
+            if not entry.seq:
+                scenes = entry_scenes(entry)
+                name = (
+                    os.path.splitext(scenes[0])[0]
+                    if scenes else (entry.target or "(未設定)")
+                )
+                if entry.repeat == "weekly":
+                    when = "週次 " + (
+                        "・".join(DAY_NAMES[d] for d in entry.days)
+                        if entry.days else "毎日"
+                    )
+                elif entry.repeat == "once":
+                    when = f"1 回限り {entry.date}"
+                else:
+                    when = "毎日"
+                parent_label = f"{entry.time} {when}: {name}"
+                continue
+            # seq エントリ
+            scenes = entry_scenes(entry)
+            scene_name = (
+                os.path.splitext(scenes[0])[0]
+                if scenes else (entry.target or "(未設定)")
+            )
+            mark = "→" if entry.enabled else "✗"
+            text = f"{mark} {scene_name}    (← {parent_label} の続き)"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, idx)
+            if not entry.enabled:
+                item.setForeground(QBrush(QColor("#aaa")))
+            self._seq_list.addItem(item)
+
+    def _selected_seq_entry(self) -> tuple[int, ScheduleEntry] | None:
+        row = self._seq_list.currentRow()
+        if row < 0:
+            return None
+        idx = self._seq_list.item(row).data(Qt.UserRole)
+        if idx is None or idx >= len(self._flow.schedule):
+            return None
+        entry = self._flow.schedule[idx]
+        if not entry.seq:
+            return None
+        return idx, entry
+
+    def _add_seq_entry(self) -> None:
+        cell = self._selected_cell()
+        if cell is None:
+            QMessageBox.information(
+                self, "続けて実行追加",
+                "テーブルで親となる時刻エントリのセルを選択してから押してください",
+            )
+            return
+        row, col = cell
+        parent = self._find_entry_at(self._row_to_time(row), col)
+        if parent is None:
+            QMessageBox.information(
+                self, "続けて実行追加",
+                "選択中のセルにエントリがありません",
+            )
+            return
+        # 親の直後に並ぶ seq エントリ群の末尾に挿入
+        parent_idx = self._flow.schedule.index(parent)
+        insert_idx = parent_idx + 1
+        while (
+            insert_idx < len(self._flow.schedule)
+            and self._flow.schedule[insert_idx].seq
+        ):
+            insert_idx += 1
+        scenes_list = self._list_scenes()
+        new_entry = ScheduleEntry(
+            target=scenes_list[0] if scenes_list else "",
+            seq=True,
+            enabled=True,
+        )
+        dlg = _EntryDialog(new_entry, scenes_list, self, mode="seq")
+        if dlg.exec():
+            self._flow.schedule.insert(insert_idx, dlg.entry)
+            self._refresh_table()
+
+    def _edit_selected_seq(self) -> None:
+        sel = self._selected_seq_entry()
+        if sel is None:
+            return
+        _, entry = sel
+        dlg = _EntryDialog(entry, self._list_scenes(), self, mode="seq")
+        if dlg.exec():
+            self._refresh_table()
+
+    def _delete_selected_seq(self) -> None:
+        sel = self._selected_seq_entry()
+        if sel is None:
+            return
+        idx, entry = sel
+        scenes = entry_scenes(entry)
+        name = (
+            os.path.splitext(scenes[0])[0]
+            if scenes else (entry.target or "(未設定)")
+        )
+        if QMessageBox.question(
+            self, "削除確認",
+            f"続けて実行エントリ「{name}」を削除しますか？",
+        ) != QMessageBox.Yes:
+            return
+        del self._flow.schedule[idx]
+        self._refresh_table()
+
     # ------------------------------------------------------- エントリ追加 / 編集
     def _list_scenes(self) -> list[str]:
+        """フロー候補（flow_target=True）のシーンのみ返す。
+
+        load_pc_scene のパースに失敗したファイルや読めないものは候補に出す
+        （誤って隠してしまうより、ユーザーが気付けるほうが良い）。
+        '_' で始まるファイル（並び順 _order.json など内部用）は除外する。
+        """
         if not os.path.isdir(SCENES_DIR):
             return []
-        return [f for f in sorted(os.listdir(SCENES_DIR)) if f.endswith(".json")]
+        out: list[str] = []
+        for fname in sorted(os.listdir(SCENES_DIR)):
+            if not fname.endswith(".json") or fname.startswith("_"):
+                continue
+            path = os.path.join(SCENES_DIR, fname)
+            try:
+                scene = load_pc_scene(path)
+                if not scene.flow_target:
+                    continue
+            except Exception:
+                # 読めなくても一覧には出す（隠すと存在自体を忘れる）
+                pass
+            out.append(fname)
+        return out
 
     def _add_entry(
         self,
@@ -460,22 +658,40 @@ class FlowEditorWindow(QWidget):
             self._refresh_table()
 
     # ------------------------------------------------------- 保存
-    def _save(self) -> None:
+    def _save_to_file(self) -> bool:
+        """保存本体。成功で True、失敗で False。saved シグナルも発火する。"""
         name = self._inp_name.text().strip()
         if name:
             self._flow.name = name
         if not self._flow.name:
             QMessageBox.warning(self, "エラー", "フロー名を入力してください")
-            return
+            return False
         if self._path is None:
             self._path = os.path.join(FLOWS_DIR, f"{self._flow.name}.json")
         try:
             save_pc_flow(self._flow, self._path)
         except Exception as e:
             QMessageBox.warning(self, "保存失敗", str(e))
-            return
+            return False
         self.saved.emit(self._path)
+        return True
+
+    def _save(self) -> None:
+        if not self._save_to_file():
+            return
         QMessageBox.information(self, "保存", f"保存しました: {self._path}")
+
+    def _save_and_apply(self) -> None:
+        """保存後、メインに即時反映を依頼する。"""
+        if not self._save_to_file():
+            return
+        self.applied.emit(self._path)
+        # 反映の結果（実行中か否か）はメイン側のログに出る。ここではダイアログは控えめに
+        QMessageBox.information(
+            self, "保存して反映",
+            f"保存しました: {self._path}\n"
+            "メインで選択中のフローと同じなら、ランナーへ反映済みです。",
+        )
 
     def closeEvent(self, e) -> None:  # noqa: N802
         try:

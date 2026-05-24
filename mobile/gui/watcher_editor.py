@@ -286,7 +286,13 @@ class _WatcherWizard(QDialog):
         self.enabled_check = QCheckBox("有効")
         self.enabled_check.setChecked(True)
         act_lay.addRow("", self.enabled_check)
-        self.alert_check = QCheckBox("🔔 発火時にデスクトップ通知を表示する")
+        self.alert_check = QCheckBox(
+            "🔔 発火時に通知（デスクトップ + Google Chat — 設定がある場合のみ）"
+        )
+        self.alert_check.setToolTip(
+            "オンにすると、Windows トースト通知と Google Chat への Webhook 通知を送ります。\n"
+            "Google Chat の Webhook URL は設定ダイアログから入力してください。"
+        )
         act_lay.addRow("", self.alert_check)
         right_lay.addWidget(grp_act)
         right_lay.addStretch()

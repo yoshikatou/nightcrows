@@ -1,14 +1,17 @@
 """デバイス一覧（ラベル + IP）と外部ツールパスを編集するダイアログ。"""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from .adb import adb_devices, is_usb_serial
 from .mdns_dialog import MdnsDialog
+from .notify import send_google_chat
 from .settings import AppSettings, Device
 
 
@@ -16,7 +19,9 @@ class DeviceSettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("設定")
-        self.resize(560, 440)
+        self.resize(640, 560)
+        # OK 時に recording/last_device/last_flow を取りこぼさないよう、元の settings を保持
+        self._initial = settings
 
         self._table = QTableWidget(0, 2)
         self._table.setHorizontalHeaderLabels(["ラベル", "IP / USB シリアル"])
@@ -66,13 +71,61 @@ class DeviceSettingsDialog(QDialog):
         hint.setWordWrap(True)
         tools_lay.addRow("", hint)
 
+        # Google Chat 通知設定
+        grp_chat = QGroupBox("Google Chat 通知（ウォッチャー発火時）")
+        chat_lay = QFormLayout(grp_chat)
+        self._chat_edit = QLineEdit(settings.google_chat_webhook)
+        self._chat_edit.setPlaceholderText(
+            "https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
+        )
+        self._chat_edit.setToolTip(
+            "Google Chat スペースの「アプリと連携」→「Webhook を追加」で発行した URL を貼り付け。"
+            "空欄なら通知無効。"
+        )
+        chat_lay.addRow("Webhook URL:", self._chat_edit)
+
+        test_row = QHBoxLayout()
+        test_row.addStretch(1)
+        self._btn_chat_test = QPushButton("テスト通知を送信")
+        self._btn_chat_test.clicked.connect(self._on_chat_test)
+        test_row.addWidget(self._btn_chat_test)
+        chat_lay.addRow("", test_row)
+
+        self._lbl_chat_test = QLabel("")
+        self._lbl_chat_test.setWordWrap(True)
+        self._lbl_chat_test.setStyleSheet("color:#555; font-size:11px;")
+        chat_lay.addRow("", self._lbl_chat_test)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self._table)
         layout.addLayout(row)
         layout.addWidget(grp_tools)
+        layout.addWidget(grp_chat)
         layout.addWidget(buttons)
 
         self._result: AppSettings | None = None
+
+    def _on_chat_test(self) -> None:
+        url = self._chat_edit.text().strip()
+        if not url:
+            self._lbl_chat_test.setStyleSheet("color:#c62828; font-size:11px;")
+            self._lbl_chat_test.setText("⚠ Webhook URL を入力してください")
+            return
+        self._lbl_chat_test.setStyleSheet("color:#555; font-size:11px;")
+        self._lbl_chat_test.setText("送信中…")
+        QApplication.processEvents()
+        ok, msg = send_google_chat(
+            url,
+            "テスト通知 (モバイル)",
+            "Nightcrows 自動化ツール（モバイル版）からのテスト送信です。\n"
+            "この通知が見えていれば、Webhook 設定は正しく動いています。",
+        )
+        if ok:
+            self._lbl_chat_test.setStyleSheet("color:#2e7d32; font-size:11px;")
+            self._lbl_chat_test.setText(f"✓ 送信成功 ({msg})")
+        else:
+            self._lbl_chat_test.setStyleSheet("color:#c62828; font-size:11px;")
+            self._lbl_chat_test.setText(f"✗ 送信失敗: {msg}")
 
     def _append_row(self, label: str, ip: str) -> None:
         r = self._table.rowCount()
@@ -163,9 +216,13 @@ class DeviceSettingsDialog(QDialog):
                                     f"{r + 1} 行目: ラベルと IP は必須です")
                 return
             devices.append(Device(label=label, ip=ip))
-        self._result = AppSettings(
+        # 元の AppSettings をベースに、ダイアログで編集した項目だけ上書き。
+        # こうしないと recording / last_device / last_flow が初期値で潰される。
+        self._result = replace(
+            self._initial,
             devices=devices,
             tesseract_cmd=self._tess_edit.text().strip(),
+            google_chat_webhook=self._chat_edit.text().strip(),
         )
         self.accept()
 

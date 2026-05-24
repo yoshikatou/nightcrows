@@ -154,6 +154,10 @@ class PcScene:
     name: str = "untitled"
     window_title: str = ""
     steps: list[PcStep] = field(default_factory=list)
+    # フローのエントリ候補として一覧に出すかどうか。
+    # False のシーンは他シーンから call_scene 等で呼ばれる「部品シーン」扱いで、
+    # フロー編集の対象シーン選択肢から除外される。既定 True（既存シーンを壊さない）。
+    flow_target: bool = True
 
 
 # ----------------------------------------------------------------- JSON 入出力
@@ -169,6 +173,7 @@ def load_pc_scene(path: str) -> PcScene:
         name=data.get("name", "untitled"),
         window_title=data.get("window_title", ""),
         steps=steps,
+        flow_target=bool(data.get("flow_target", True)),
     )
 
 
@@ -176,6 +181,7 @@ def save_pc_scene(scene: PcScene, path: str) -> None:
     data = {
         "name": scene.name,
         "window_title": scene.window_title,
+        "flow_target": scene.flow_target,
         "steps": [{"type": s.type, **s.params} for s in scene.steps],
     }
     out_dir = os.path.dirname(path)
@@ -272,6 +278,16 @@ def run_pc_scene(
             tmpl_path = p.get("path", "")
             timeout_s = float(p.get("timeout_s", 10.0))
             threshold = float(p.get("threshold", 0.85))
+
+            # snapshots/ 配下のフル画面キャプチャは編集時のキャンバス表示用で、
+            # ゲーム画面と完全一致するはずがない（状態が刻々変わるため）。
+            # 再生時は no-op として即時通過する。
+            # 「画像出現待ち」用テンプレは templates/ 配下に保存されるので、そちらだけ評価対象。
+            norm = tmpl_path.replace("\\", "/")
+            if norm.startswith("snapshots/") or "/snapshots/" in norm:
+                log(f"  [{i+1}/{total}] snapshot {tmpl_path}  (編集用フルキャプチャ — 再生時はスキップ)")
+                continue
+
             log(f"  [{i+1}/{total}] snapshot {tmpl_path}  timeout={timeout_s}s")
 
             tmpl = cv2.imread(tmpl_path, cv2.IMREAD_COLOR)
