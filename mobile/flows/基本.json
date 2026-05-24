@@ -23,7 +23,7 @@
     },
     {
       "time": "00:30",
-      "target": "BF3＋84LV.json",
+      "target": "BF3+94LV.json",
       "repeat": "weekly",
       "days": [
         0
@@ -35,14 +35,6 @@
       "repeat": "weekly",
       "days": [
         1
-      ]
-    },
-    {
-      "time": "05:30",
-      "target": "クエスト処理.json",
-      "repeat": "weekly",
-      "days": [
-        0
       ]
     },
     {
