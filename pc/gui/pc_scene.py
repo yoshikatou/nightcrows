@@ -211,7 +211,10 @@ def run_pc_scene(
     depth: int = 0,
     _call_stack: list[str] | None = None,
 ) -> bool:
-    """シーンを実行する。全ステップ完了なら True、中断/失敗なら False。
+    """シーンを実行する。全ステップ完了なら True、停止要求や失敗なら False。
+
+    呼び出し側で should_stop() が True を返したか確認すれば、
+    「ユーザー停止」と「実行失敗」を区別できる。
 
     depth / _call_stack は call_scene / if_image / pick_scene による
     シーン呼び出しの階層管理用（再帰呼び出し時にインクリメント）。
@@ -328,7 +331,25 @@ def run_pc_scene(
                 continue
 
             ax, ay = rel_to_abs(hwnd, rx, ry)
+            cw, ch = win32gui.GetClientRect(hwnd)[2:4]
+            log(f"    → 絶対座標 ({ax}, {ay})  ボタン={button} hold={hold_ms}ms  "
+                f"client={cw}x{ch}")
             mouse.click(ax, ay, button, hold_ms=hold_ms)
+            # クリック後の実カーソル位置を確認。
+            # SetCursorPos が Nightcrows のチート対策でブロックされていると
+            # 目標位置に動かず、最後のカーソル位置のままクリックが繰り返される現象が
+            # 出るため、HID 相対移動でやり直し（click_at）。
+            try:
+                fx, fy = mouse.get_cursor_pos()
+                if abs(fx - ax) > 3 or abs(fy - ay) > 3:
+                    log(
+                        f"    ⚠ カーソル未到達 実({fx},{fy}) 目標({ax},{ay}) "
+                        f"差({fx-ax:+d},{fy-ay:+d}) — HID 相対移動でリトライ"
+                    )
+                    rx2, ry2 = mouse.click_at(ax, ay, button, hold_ms=hold_ms)
+                    log(f"    → リトライ後カーソル ({rx2}, {ry2})")
+            except Exception as e:
+                log(f"    ⚠ クリック検証/リトライ例外: {e}")
 
         elif t == "tap_image":
             tmpl_path = p.get("template", p.get("path", ""))

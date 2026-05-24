@@ -21,7 +21,7 @@ from typing import Callable
 
 import cv2
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCursor, QKeySequence, QShortcut
+from PySide6.QtGui import QBrush, QColor, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -67,6 +67,7 @@ class SceneEditorWindow(QWidget):
 
     _log_signal        = Signal(str)
     _play_state_signal = Signal(bool)   # True=実行中, False=停止
+    _step_run_signal   = Signal(int)    # 実行中ステップ row（-1=ハイライト解除）
     saved  = Signal(str)                # 保存完了 (パス) — メインの一覧更新トリガ
     closed = Signal(object)             # ウィンドウクローズ通知 — 参照解除用
 
@@ -108,6 +109,7 @@ class SceneEditorWindow(QWidget):
 
         self._log_signal.connect(self._append_run_log)
         self._play_state_signal.connect(self._on_play_state)
+        self._step_run_signal.connect(self._highlight_running_step)
 
         self._build_ui()
         self._refresh_steps()
@@ -1078,7 +1080,7 @@ class SceneEditorWindow(QWidget):
             return
         step = self._scene.steps[row]
         self._append_run_log(f"--- 単発実行 #{row + 1}: {step.type} ---")
-        self._launch_thread([step])
+        self._launch_thread([step], start_row=row)
 
     def _toggle_play(self) -> None:
         if self._play_thread and self._play_thread.is_alive():
@@ -1089,9 +1091,9 @@ class SceneEditorWindow(QWidget):
             self._append_run_log("⚠ ステップがありません")
             return
         self._append_run_log(f"--- 再生: {self._scene.name} ({len(self._scene.steps)} ステップ) ---")
-        self._launch_thread(list(self._scene.steps))
+        self._launch_thread(list(self._scene.steps), start_row=0)
 
-    def _launch_thread(self, steps: list[PcStep]) -> None:
+    def _launch_thread(self, steps: list[PcStep], start_row: int = 0) -> None:
         self._stop_flag = False
         title = self._scene.window_title
         # 実行用に一時シーンを作る
@@ -1108,6 +1110,10 @@ class SceneEditorWindow(QWidget):
         if mouse is None:
             self._append_run_log("⚠ Pico 未接続（tap/swipe/tap_image はスキップされます）")
 
+        def _step_cb(i: int, _total: int) -> None:
+            # i は 1-based。実シーン上の row = start_row + (i - 1)
+            self._step_run_signal.emit(start_row + i - 1)
+
         def _worker() -> None:
             self._play_state_signal.emit(True)
             try:
@@ -1117,15 +1123,38 @@ class SceneEditorWindow(QWidget):
                     hwnd=hwnd,
                     log=self._log_signal.emit,
                     should_stop=lambda: self._stop_flag,
+                    step_callback=_step_cb,
                 )
-                self._log_signal.emit("完了" if ok else "中断/失敗")
+                if ok:
+                    self._log_signal.emit("✓ 完了")
+                elif self._stop_flag:
+                    self._log_signal.emit("■ 停止 (ユーザー操作)")
+                else:
+                    self._log_signal.emit("✗ 失敗")
             except Exception as e:
                 self._log_signal.emit(f"⚠ 例外: {e}")
             finally:
+                # ハイライト解除
+                self._step_run_signal.emit(-1)
                 self._play_state_signal.emit(False)
 
         self._play_thread = threading.Thread(target=_worker, daemon=True)
         self._play_thread.start()
+
+    # --- ステップ行ハイライト
+    _STEP_BG_RUNNING = QColor("#fff59d")   # 実行中（薄黄）
+
+    def _highlight_running_step(self, row: int) -> None:
+        """row=実行中ステップを黄背景。row=-1 で全解除。"""
+        bg_run = QBrush(self._STEP_BG_RUNNING)
+        clear  = QBrush()  # 既定背景（無色 = テーマ依存）
+        for i in range(self._list_steps.count()):
+            item = self._list_steps.item(i)
+            if item is None:
+                continue
+            item.setBackground(bg_run if i == row else clear)
+        if 0 <= row < self._list_steps.count():
+            self._list_steps.scrollToItem(self._list_steps.item(row))
 
     # ---------------------------------------------------------------- 保存
     def _save(self) -> None:

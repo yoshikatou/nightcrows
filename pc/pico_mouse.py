@@ -114,11 +114,30 @@ class PicoMouse:
     def click(
         self, x: int, y: int, button: str = "L", hold_ms: int = 30
     ) -> None:
-        """指定座標にカーソルを移動してクリックを送信する。"""
+        """指定座標にカーソルを移動してクリックを送信する（SetCursorPos のジャンプ版）。
+
+        高速だが、ゲームのチート対策で SetCursorPos がブロックされる環境では
+        カーソルが動かず、最後にいた位置でクリックされてしまうことがある。
+        その場合は `click_at` を使うか、tap 側で自動リトライされる。
+        """
         self.move_cursor(x, y)
         resp = self._cmd(f"CLICK {button.upper()} {hold_ms}")
         if resp != "OK":
             raise RuntimeError(f"Pico CLICK エラー: {resp}")
+
+    def click_at(
+        self, x: int, y: int, button: str = "L", hold_ms: int = 30,
+    ) -> tuple[int, int]:
+        """HID 相対移動で目標座標へ動かしてからクリック（SetCursorPos を使わない確実版）。
+
+        Nightcrows 等のチート対策で SetCursorPos がブロックされる状況でも、
+        実マウス相当の HID 相対移動なら通る。戻り値は最終カーソル位置。
+        """
+        fx, fy = self.move_to_accurate(x, y)
+        resp = self._cmd(f"CLICK {button.upper()} {hold_ms}")
+        if resp != "OK":
+            raise RuntimeError(f"Pico CLICK エラー: {resp}")
+        return fx, fy
 
     def move(self, dx: int, dy: int) -> None:
         """相対移動を Pico HID で送信する (-127〜127)。"""

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -78,6 +79,8 @@ except ImportError:
 
 class PcFlowWindow(QWidget):
     """PC フロー制御メインウィンドウ（縦長タブ構成）。"""
+
+    _test_log_signal = Signal(str)   # 別スレッドからテストログを安全に表示するため
 
     def __init__(self, settings: dict) -> None:
         super().__init__()
@@ -155,6 +158,8 @@ class PcFlowWindow(QWidget):
             self._btn_test_lclick,
             self._btn_test_rclick,
             self._btn_test_drag,
+            self._btn_seq_hid,
+            self._btn_seq_park,
         ):
             btn.setEnabled(enabled)
 
@@ -383,6 +388,41 @@ class PcFlowWindow(QWidget):
         self._btn_test_drag.clicked.connect(self._test_drag)
         drag_lay.addWidget(self._btn_test_drag)
         lay.addWidget(drag_grp)
+
+        # 3 点連続クリックテスト
+        seq_grp = QGroupBox("連続クリック検証 (目標 → 開始 → 終了 の 3 点を順次)")
+        seq_lay = QVBoxLayout(seq_grp)
+        seq_lay.setContentsMargins(8, 6, 8, 6)
+        seq_lay.setSpacing(4)
+        seq_wait_row = QHBoxLayout()
+        seq_wait_row.addWidget(QLabel("間隔:"))
+        self._spin_seq_wait = QDoubleSpinBox()
+        self._spin_seq_wait.setRange(0.1, 30.0)
+        self._spin_seq_wait.setSingleStep(0.5)
+        self._spin_seq_wait.setDecimals(1)
+        self._spin_seq_wait.setValue(1.5)
+        self._spin_seq_wait.setSuffix(" 秒")
+        self._spin_seq_wait.setFixedWidth(80)
+        seq_wait_row.addWidget(self._spin_seq_wait)
+        seq_wait_row.addStretch(1)
+        seq_lay.addLayout(seq_wait_row)
+        self._btn_seq_hid = QPushButton("A: HID 直接で 3 点連続クリック (click_at)")
+        self._btn_seq_hid.setToolTip(
+            "毎回 HID 相対移動で目標へ動かしてクリック。確実だが少し遅い。"
+        )
+        self._btn_seq_hid.clicked.connect(self._test_seq_hid)
+        seq_lay.addWidget(self._btn_seq_hid)
+        self._btn_seq_park = QPushButton(
+            "B: 画面外パーク → SetCursorPos で 3 点連続クリック"
+        )
+        self._btn_seq_park.setToolTip(
+            "ヘッダーで選んだ対象ウィンドウの外へ HID で逃がしてから "
+            "SetCursorPos でジャンプ → CLICK。\n"
+            "ゲーム内でカーソルが滞在中だと SetCursorPos がブロックされる仮説の検証用。"
+        )
+        self._btn_seq_park.clicked.connect(self._test_seq_park)
+        seq_lay.addWidget(self._btn_seq_park)
+        lay.addWidget(seq_grp)
 
         # ログ
         lay.addWidget(QLabel("実行結果:"))
@@ -958,6 +998,7 @@ class PcFlowWindow(QWidget):
         self._runner.next_schedule_changed.connect(self._lbl_next_sched.setText)
         self._runner.scene_started.connect(self._on_scene_started)
         self._runner.step_updated.connect(self._on_step_updated)
+        self._test_log_signal.connect(self._test_log_append)
 
     # ---------------------------------------------------------------- 設定復元
     def _purge_old_logs(self) -> None:
@@ -1490,6 +1531,126 @@ class PcFlowWindow(QWidget):
         self._test_log.append(msg)
         sb = self._test_log.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    # ---------------- 3 点連続クリック検証（HID 直接 / 画面外パーク経由）
+    def _collect_seq_points(self) -> list[tuple[str, int, int]] | None:
+        """テストタブの 目標 / ドラッグ開始 / ドラッグ終了 3 点を回収。"""
+        points: list[tuple[str, int, int]] = []
+        for label, xinp, yinp in (
+            ("目標",   self._inp_test_x, self._inp_test_y),
+            ("開始",   self._inp_drag_sx, self._inp_drag_sy),
+            ("終了",   self._inp_drag_ex, self._inp_drag_ey),
+        ):
+            try:
+                x = int(xinp.text())
+                y = int(yinp.text())
+            except ValueError:
+                self._test_log_append(f"⚠ {label} の座標を整数で入力してください")
+                return None
+            points.append((label, x, y))
+        return points
+
+    def _test_seq_hid(self) -> None:
+        """A: 毎回 click_at（HID 移動 → CLICK）で 3 点連続クリック。"""
+        if not self._mouse:
+            self._test_log_append("⚠ Pico 未接続")
+            return
+        points = self._collect_seq_points()
+        if points is None:
+            return
+        wait_s = float(self._spin_seq_wait.value())
+        self._test_log_append(
+            f"--- [A] HID 直接で 3 点連続クリック (間隔 {wait_s}s) ---"
+        )
+
+        def _worker() -> None:
+            for i, (label, x, y) in enumerate(points):
+                if i > 0:
+                    time.sleep(wait_s)
+                self._test_log_signal.emit(
+                    f"  [{i+1}/{len(points)}] {label} → click_at ({x},{y})"
+                )
+                try:
+                    fx, fy = self._mouse.click_at(x, y, "L", hold_ms=50)
+                    self._test_log_signal.emit(
+                        f"    実位置 ({fx},{fy})  誤差 ({fx-x:+d},{fy-y:+d})"
+                    )
+                except Exception as e:
+                    self._test_log_signal.emit(f"    ⚠ 例外: {e}")
+            self._test_log_signal.emit("--- [A] 完了 ---")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _test_seq_park(self) -> None:
+        """B: 対象ウィンドウ外へ HID で逃がす → SetCursorPos → CLICK を 3 回。"""
+        if not self._mouse:
+            self._test_log_append("⚠ Pico 未接続")
+            return
+        title = self._settings.get("window_title", "")
+        hwnd = find_hwnd_by_title(title) if title else None
+        if not hwnd:
+            self._test_log_append(f"⚠ 対象ウィンドウが見つかりません: {title!r}")
+            return
+        points = self._collect_seq_points()
+        if points is None:
+            return
+        wait_s = float(self._spin_seq_wait.value())
+
+        # 対象ウィンドウのクライアント領域の絶対矩形を取得し、その右上外側へ逃がす。
+        # 右下だと Windows のタスクバーが反応してメニューが開く事があるため、
+        # 上方向（ウィンドウのタイトルバーより上）に逃がす。
+        try:
+            from .capture import get_client_screen_rect
+            left, top, w_, h_ = get_client_screen_rect(hwnd)
+            park_x = min(left + w_ + 80, 32760)
+            park_y = max(top - 80, 0)
+        except Exception as e:
+            self._test_log_append(f"⚠ パーク位置算出失敗: {e}")
+            return
+        self._test_log_append(
+            f"--- [B] 画面外パーク({park_x},{park_y}) → SetCursorPos で "
+            f"3 点連続クリック (間隔 {wait_s}s) ---"
+        )
+
+        def _worker() -> None:
+            for i, (label, x, y) in enumerate(points):
+                if i > 0:
+                    time.sleep(wait_s)
+                # 1) ウィンドウ外へ HID で逃がす
+                try:
+                    self._mouse.move_to(park_x, park_y, max_step=40, delay=0.005)
+                    time.sleep(0.05)
+                    px, py = self._mouse.get_cursor_pos()
+                    self._test_log_signal.emit(
+                        f"  [{i+1}/{len(points)}] {label}: HID パーク後 "
+                        f"({px},{py})  目標パーク ({park_x},{park_y})"
+                    )
+                except Exception as e:
+                    self._test_log_signal.emit(f"    ⚠ パーク例外: {e}")
+                    continue
+                # 2) SetCursorPos でジャンプ
+                try:
+                    self._mouse.move_cursor(x, y)
+                    time.sleep(0.03)
+                    cx, cy = self._mouse.get_cursor_pos()
+                    miss = abs(cx - x) > 3 or abs(cy - y) > 3
+                    self._test_log_signal.emit(
+                        f"    SetCursorPos → 実({cx},{cy})  目標({x},{y})  "
+                        f"誤差({cx-x:+d},{cy-y:+d})"
+                        + ("  ⚠ ブロックされた可能性" if miss else "")
+                    )
+                except Exception as e:
+                    self._test_log_signal.emit(f"    ⚠ ジャンプ例外: {e}")
+                    continue
+                # 3) CLICK 送信
+                try:
+                    resp = self._mouse._cmd("CLICK L 50")
+                    self._test_log_signal.emit(f"    CLICK resp={resp}")
+                except Exception as e:
+                    self._test_log_signal.emit(f"    ⚠ CLICK 例外: {e}")
+            self._test_log_signal.emit("--- [B] 完了 ---")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ---------------------------------------------------------------- 定期更新
     def _refresh_status(self) -> None:
