@@ -3,7 +3,11 @@
 PC シーン JSON を読み込み、各ステップを順次実行する。
 
 ステップタイプ:
-- snapshot:     キャプチャ + cv2.matchTemplate でテンプレート一致を待つ (= wait_image)
+- snapshot:     シーン編集時のスクショ撮影マーカー（path = "snapshots/..."）。
+                ステップ番号・キャンバス切替の文脈情報として JSON に残るが、
+                再生時は即スキップする no-op。画像マッチ機能ではない。
+- wait_image:   キャプチャ + cv2.matchTemplate でテンプレート一致を待つ。
+                template = "templates/..." と threshold / timeout_s / region を持つ。
 - tap_image:    テンプレートが一致した位置をクリック
                 (region で検索範囲を絞れる、tap_offset_x/y でクリック位置をずらせる)
 - tap:          PicoMouse.click()（rx/ry = ウィンドウクライアント相対比率 0.0〜1.0）
@@ -168,6 +172,27 @@ def load_pc_scene(path: str) -> PcScene:
     for s in data.get("steps", []):
         s = dict(s)
         t = s.pop("type")
+        # 旧形式マイグレーション:
+        # 「snapshot で path が templates/ 配下のもの」は元々の画像出現待ち用途。
+        # 新仕様では wait_image タイプに分離するので、ここで自動変換する。
+        # 「snapshot で path が snapshots/ 配下のもの」は撮影マーカーなのでそのまま
+        # 残すが、画像マッチ用の threshold / timeout_s は意味を持たないため除去する。
+        if t == "snapshot":
+            raw_path = str(s.get("path", "")).replace("\\", "/")
+            if raw_path.startswith("templates/") or "/templates/" in raw_path:
+                # wait_image に転換
+                t = "wait_image"
+                new_params: dict = {"template": s.get("path", "")}
+                if "threshold" in s:
+                    new_params["threshold"] = s["threshold"]
+                if "timeout_s" in s:
+                    new_params["timeout_s"] = s["timeout_s"]
+                if "region" in s:
+                    new_params["region"] = s["region"]
+                s = new_params
+            else:
+                # 撮影マーカー: 画像マッチ用パラメータを捨てる
+                s = {"path": s.get("path", "")}
         steps.append(PcStep(type=t, params=s))
     return PcScene(
         name=data.get("name", "untitled"),
@@ -278,20 +303,19 @@ def run_pc_scene(
                 time.sleep(0.05)
 
         elif t == "snapshot":
-            tmpl_path = p.get("path", "")
+            # 編集時のスクショ撮影マーカー。再生では何もしない no-op。
+            # ステップ番号維持 / キャンバス切替の文脈用に JSON に残るが、
+            # 画像マッチ機能は wait_image ステップが持つ。
+            snap_path = p.get("path", "")
+            log(f"  [{i+1}/{total}] snapshot {snap_path}  (スクショ撮影 — 再生時スキップ)")
+
+        elif t == "wait_image":
+            tmpl_path = p.get("template", p.get("path", ""))
             timeout_s = float(p.get("timeout_s", 10.0))
             threshold = float(p.get("threshold", 0.85))
-
-            # snapshots/ 配下のフル画面キャプチャは編集時のキャンバス表示用で、
-            # ゲーム画面と完全一致するはずがない（状態が刻々変わるため）。
-            # 再生時は no-op として即時通過する。
-            # 「画像出現待ち」用テンプレは templates/ 配下に保存されるので、そちらだけ評価対象。
-            norm = tmpl_path.replace("\\", "/")
-            if norm.startswith("snapshots/") or "/snapshots/" in norm:
-                log(f"  [{i+1}/{total}] snapshot {tmpl_path}  (編集用フルキャプチャ — 再生時はスキップ)")
-                continue
-
-            log(f"  [{i+1}/{total}] snapshot {tmpl_path}  timeout={timeout_s}s")
+            region = p.get("region")   # [rx, ry, rw, rh] (0.0〜1.0) or None
+            log(f"  [{i+1}/{total}] wait_image {tmpl_path}  "
+                f"threshold={threshold} timeout={timeout_s}s")
 
             tmpl = cv2.imread(tmpl_path, cv2.IMREAD_COLOR)
             if tmpl is None:
@@ -305,15 +329,14 @@ def run_pc_scene(
                     return False
                 if hwnd and win32gui.IsWindow(hwnd):
                     img = capture_window(hwnd)
-                    if (img is not None
-                            and img.shape[0] >= tmpl.shape[0]
-                            and img.shape[1] >= tmpl.shape[1]):
-                        res = cv2.matchTemplate(img, tmpl, cv2.TM_CCOEFF_NORMED)
-                        _, maxv, _, _ = cv2.minMaxLoc(res)
-                        if maxv >= threshold:
-                            log(f"    一致 score={maxv:.3f}")
-                            matched = True
-                            break
+                    if img is not None:
+                        result = _match_template(img, tmpl_path, region)
+                        if result is not None:
+                            _, score = result
+                            if score >= threshold:
+                                log(f"    一致 score={score:.3f}")
+                                matched = True
+                                break
                 time.sleep(0.5)
 
             if not matched:
@@ -334,22 +357,15 @@ def run_pc_scene(
             cw, ch = win32gui.GetClientRect(hwnd)[2:4]
             log(f"    → 絶対座標 ({ax}, {ay})  ボタン={button} hold={hold_ms}ms  "
                 f"client={cw}x{ch}")
-            mouse.click(ax, ay, button, hold_ms=hold_ms)
-            # クリック後の実カーソル位置を確認。
-            # SetCursorPos が Nightcrows のチート対策でブロックされていると
-            # 目標位置に動かず、最後のカーソル位置のままクリックが繰り返される現象が
-            # 出るため、HID 相対移動でやり直し（click_at）。
+            # HID 相対移動 + クリック（SetCursorPos を使わない確実版）。
+            # SetCursorPos 経路は Nightcrows のチート対策でブロックされ、
+            # 「画面外パーク → SetCursorPos」方式でも誤タップが発生する事例があるため、
+            # シーン再生では HID 直接 (click_at) を採用する。
             try:
-                fx, fy = mouse.get_cursor_pos()
-                if abs(fx - ax) > 3 or abs(fy - ay) > 3:
-                    log(
-                        f"    ⚠ カーソル未到達 実({fx},{fy}) 目標({ax},{ay}) "
-                        f"差({fx-ax:+d},{fy-ay:+d}) — HID 相対移動でリトライ"
-                    )
-                    rx2, ry2 = mouse.click_at(ax, ay, button, hold_ms=hold_ms)
-                    log(f"    → リトライ後カーソル ({rx2}, {ry2})")
+                fx, fy = mouse.click_at(ax, ay, button, hold_ms=hold_ms)
+                log(f"    → 実カーソル ({fx},{fy})  誤差({fx-ax:+d},{fy-ay:+d})")
             except Exception as e:
-                log(f"    ⚠ クリック検証/リトライ例外: {e}")
+                log(f"    ⚠ click_at 例外: {e}")
 
         elif t == "tap_image":
             tmpl_path = p.get("template", p.get("path", ""))
@@ -406,7 +422,12 @@ def run_pc_scene(
                     ax = origin[0] + cx
                     ay = origin[1] + cy
                     log(f"    一致 score={maxv:.3f} click ({ax}, {ay})")
-                    mouse.click(ax, ay, button, hold_ms=hold_ms)
+                    # tap と同様に HID 直接 (click_at) で確実にクリック。
+                    try:
+                        fx, fy = mouse.click_at(ax, ay, button, hold_ms=hold_ms)
+                        log(f"    → 実カーソル ({fx},{fy})  誤差({fx-ax:+d},{fy-ay:+d})")
+                    except Exception as e:
+                        log(f"    ⚠ click_at 例外: {e}")
                     matched = True
                     break
                 time.sleep(0.5)

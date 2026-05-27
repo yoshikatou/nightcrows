@@ -1,0 +1,14 @@
+{
+  "name": "BF3入口＋94LV",
+  "window_title": "NIGHT CROWS(1)",
+  "steps": [
+    {
+      "type": "call_scene",
+      "scene": "BF3入口.json"
+    },
+    {
+      "type": "call_scene",
+      "scene": "BF3 94LV.json"
+    }
+  ]
+}

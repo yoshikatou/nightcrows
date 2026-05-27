@@ -1,0 +1,55 @@
+{
+  "name": "動作テスト",
+  "window_title": "NIGHT CROWS(1)",
+  "flow_target": true,
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260525_004357_840346.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.9778,
+      "ry": 0.0216,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260525_004407_873969.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.8198,
+      "ry": 0.2165,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260525_004418_830417.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.9787,
+      "ry": 0.0228,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    }
+  ]
+}

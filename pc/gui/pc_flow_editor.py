@@ -459,9 +459,23 @@ class FlowEditorWindow(QWidget):
             self._edit_entry(match)
 
     def _find_entry_at(self, time_str: str, weekday: int) -> ScheduleEntry | None:
+        """time_str が示す 30 分スロット内のエントリを返す。
+
+        time_str は _row_to_time によって `HH:00` または `HH:30` のいずれか
+        （行スロットの基準時刻）。エントリ自身の time が 05:10 のような中途半端な
+        値でも、行スロットが同じなら一致と判定する（厳密一致だと削除/編集できない）。
+        """
+        target_row = self._time_to_row(time_str)
+        if target_row is None:
+            return None
         for entry in self._flow.schedule:
-            if entry.time == time_str and weekday in self._entry_columns(entry):
-                return entry
+            if entry.seq:
+                continue   # 続けて実行はグリッド対象外
+            if self._time_to_row(entry.time) != target_row:
+                continue
+            if weekday not in self._entry_columns(entry):
+                continue
+            return entry
         return None
 
     def _selected_cell(self) -> tuple[int, int] | None:

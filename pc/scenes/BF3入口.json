@@ -1,0 +1,55 @@
+{
+  "name": "BF3入口",
+  "window_title": "NIGHT CROWS(1)",
+  "flow_target": false,
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260523_210255_464424.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.9756,
+      "ry": 0.024,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260523_210306_186621.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.8982,
+      "ry": 0.2792,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260523_210336_908504.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.7001,
+      "ry": 0.6646,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 30.0
+    }
+  ]
+}

@@ -14,6 +14,7 @@ mobile/ への依存を持たず PC 単体で動作するよう、必要な部�
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import random
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Callable
 
+import win32con
+import win32gui
 from PySide6.QtCore import QObject, Signal
 
 from .capture import capture_window
@@ -30,7 +33,42 @@ from .logger import write_log
 from .notify import send_google_chat
 from .pc_scene import SCENES_DIR, load_pc_scene, run_pc_scene
 from .pc_watcher import PcWatcher, evaluate_watcher, list_pc_watchers
+from .watcher_counts import record_fire as record_watcher_fire
 from .window_picker import find_hwnd_by_title
+
+
+# ----------------------------------------------------------------- 前面化ユーティリティ
+def is_window_foreground(hwnd: int) -> bool:
+    """対象ウィンドウが最前面でフォーカスされているか。
+
+    最小化中は False。ウィンドウハンドル無効も False。
+    """
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        return False
+    if win32gui.IsIconic(hwnd):
+        return False
+    return win32gui.GetForegroundWindow() == hwnd
+
+
+def bring_window_to_foreground(hwnd: int) -> bool:
+    """対象ウィンドウを前面化する。成功なら True。
+
+    最小化解除 → SwitchToThisWindow による Alt+Tab 相当の切替を行う。
+    合成キー入力ではないので Nightcrows のチート対策で弾かれない。
+    """
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        return False
+    if win32gui.IsIconic(hwnd):
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        time.sleep(0.1)
+    if win32gui.GetForegroundWindow() == hwnd:
+        return True
+    try:
+        ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
+    except Exception:
+        return False
+    time.sleep(0.2)
+    return win32gui.GetForegroundWindow() == hwnd
 
 LogFn = Callable[[str], None]
 
@@ -199,6 +237,54 @@ def check_schedule(
     return idx, entry
 
 
+def last_due_scenes(
+    flow: PcFlow, now: datetime,
+) -> tuple[ScheduleEntry, list[str]] | None:
+    """現在時刻より前で直近のスケジュールエントリ (entry, シーンリスト) を返す。
+
+    シーン外でウォッチャーが発火し after=restart_scene が要求されたが
+    まだ当日シーンが実行されていない（深夜跨ぎ・起動直後など）場合の
+    フォールバックに使う。
+
+    曜日フィルタ・enabled / once 日付を考慮し、当日中で最も遅い時刻のエントリを返す。
+    seq エントリ単独はトリガー対象外（直前エントリ完了後の連鎖実行用途のため）。
+    """
+    current_hm = now.strftime("%H:%M")
+    today_str = now.date().isoformat()
+    today_wd = now.weekday()
+
+    candidates: list[tuple[str, ScheduleEntry, list[str]]] = []
+    for idx, entry in enumerate(flow.schedule):
+        if not entry.enabled:
+            continue
+        if entry.seq:
+            continue
+        if entry.time >= current_hm:
+            continue
+        if entry.repeat == "once" and entry.date != today_str:
+            continue
+        if entry.repeat == "weekly" and entry.days and today_wd not in entry.days:
+            continue
+        scenes = list(entry_scenes(entry))
+        # 直後に続く seq エントリも連鎖させる（スケジュール発火時と同じ挙動）
+        j = idx + 1
+        while j < len(flow.schedule):
+            nxt = flow.schedule[j]
+            if not nxt.seq:
+                break
+            if nxt.enabled:
+                scenes.extend(entry_scenes(nxt))
+            j += 1
+        if scenes:
+            candidates.append((entry.time, entry, scenes))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    _, entry, scenes = candidates[0]
+    return entry, scenes
+
+
 def next_schedule_str(flow: PcFlow, now: datetime) -> str:
     """次回発火予定のスケジュール説明文を返す（UI 表示用）。"""
     best_entry: ScheduleEntry | None = None
@@ -280,6 +366,11 @@ class PcFlowRunner(QObject):
     step_updated          = Signal(int, int)         # (current, total)
     state_changed         = Signal(str)              # "idle" | "running"
     next_schedule_changed = Signal(str)
+    # (watcher_id, title, today_count, last_fired "HH:MM:SS")
+    watcher_fired_visual  = Signal(str, str, int, str)
+    # 前面確認ダイアログ要求: (scene_name, done_event)
+    # UI 側でダイアログ表示 → set_foreground_choice(choice) → done_event.set() を期待
+    foreground_confirm_request = Signal(str, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -295,6 +386,9 @@ class PcFlowRunner(QObject):
         # 通知設定（Google Chat Webhook）。空文字なら通知しない。
         self._notify_webhook = ""
 
+        # 単発シーン実行（手動: UI のシーン一覧 / 実行タブの右クリック）
+        self._manual_thread: threading.Thread | None = None
+
         # ウォッチャー関連
         self._watchers: list[PcWatcher] = []
         self._watcher_thread: threading.Thread | None = None
@@ -306,10 +400,30 @@ class PcFlowRunner(QObject):
         self._hit_counts: dict[str, int] = {}
         self._last_fired: dict[str, float] = {}
 
+        # 前面確認ダイアログ用（UI スレッドから値をセットしてもらう）
+        self._foreground_lock = threading.Lock()
+        self._foreground_choice = "run"
+        # 直近ダイアログの選択キャッシュ（N 分以内なら再表示せず再利用）
+        self._fg_last_choice: str | None = None    # "run" / "skip"（wait はキャッシュ対象外）
+        self._fg_last_decision_mono: float = 0.0   # キャッシュ確定時刻 (time.monotonic)
+        self._fg_cache_seconds: float = 300.0      # 既定 5 分（UI から変更）
+
     # ---- 公開 API ----
     @property
     def is_running(self) -> bool:
+        """スケジュール実行（メインフロー）が走っているか。"""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def is_manual_running(self) -> bool:
+        """単発シーン実行（手動）が走っているか。"""
+        t = getattr(self, "_manual_thread", None)
+        return t is not None and t.is_alive()
+
+    @property
+    def is_busy(self) -> bool:
+        """スケジュール実行・単発実行のいずれかが進行中か。"""
+        return self.is_running or self.is_manual_running
 
     @property
     def current_scene(self) -> str:
@@ -336,7 +450,7 @@ class PcFlowRunner(QObject):
         return flow
 
     def start(self) -> None:
-        if self.is_running:
+        if self.is_busy:
             return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -344,7 +458,86 @@ class PcFlowRunner(QObject):
         self.state_changed.emit("running")
 
     def stop(self) -> None:
+        """スケジュール / 単発の両方を停止対象とする（_stop_event を共有）。"""
         self._stop_event.set()
+
+    def run_scene_async(self, scene_path: str) -> bool:
+        """単一シーンを単発実行する（UI から手動で叩く用）。
+
+        スケジュール実行中・単発実行中は受け付けない。受理時 True。
+        scene_path は scenes/ 相対 or 単なる "DQ.json" 等のシーン名。
+        """
+        if self.is_busy:
+            return False
+        if not scene_path:
+            return False
+        self._stop_event.clear()
+        self._manual_thread = threading.Thread(
+            target=self._run_manual, args=(scene_path,), daemon=True,
+        )
+        self._manual_thread.start()
+        self.state_changed.emit("running")
+        return True
+
+    def run_scenes_async(self, scene_paths: list[str]) -> bool:
+        """シーン列を順次単発実行する（実行タブ右クリックで親+seq を一括実行する用）。
+
+        スケジュール実行中・単発実行中は受け付けない。受理時 True。
+        """
+        if self.is_busy:
+            return False
+        scenes = [s for s in scene_paths if s]
+        if not scenes:
+            return False
+        self._stop_event.clear()
+        self._manual_thread = threading.Thread(
+            target=self._run_manual_chain, args=(scenes,), daemon=True,
+        )
+        self._manual_thread.start()
+        self.state_changed.emit("running")
+        return True
+
+    def _run_manual(self, scene_path: str) -> None:
+        self._log(f"単発実行 開始: {scene_path}")
+        try:
+            ok = self._run_scene(scene_path)
+            if self._stop_event.is_set():
+                self._log("■ 単発実行 停止 (ユーザー)")
+            elif ok:
+                self._log("✓ 単発実行 完了")
+            else:
+                self._log("✗ 単発実行 失敗")
+        except Exception as e:
+            self._log(f"⚠ 単発実行 例外: {e}")
+        finally:
+            self._current_scene = ""
+            self._current_step = 0
+            self._total_steps = 0
+            self.state_changed.emit("idle")
+            self._emit_next_schedule()
+
+    def _run_manual_chain(self, scenes: list[str]) -> None:
+        self._log(f"単発実行 (連鎖 {len(scenes)} 件) 開始")
+        try:
+            for k, path in enumerate(scenes):
+                if self._stop_event.is_set():
+                    self._log("■ 単発実行 停止 (ユーザー)")
+                    break
+                self._log(f"  [{k+1}/{len(scenes)}] {path}")
+                ok = self._run_scene(path)
+                if not ok and not self._stop_event.is_set():
+                    self._log(f"  ✗ {path} 失敗 — 後続スキップ")
+                    break
+            else:
+                self._log("✓ 単発実行 (連鎖) 完了")
+        except Exception as e:
+            self._log(f"⚠ 単発実行 例外: {e}")
+        finally:
+            self._current_scene = ""
+            self._current_step = 0
+            self._total_steps = 0
+            self.state_changed.emit("idle")
+            self._emit_next_schedule()
 
     # ---- 内部 ----
     def _should_stop(self) -> bool:
@@ -365,6 +558,122 @@ class PcFlowRunner(QObject):
         self._current_step = step
         self._total_steps = total
         self.step_updated.emit(step, total)
+
+    # ---- 前面化チェック ----
+    def set_foreground_choice(self, choice: str) -> None:
+        """UI 側のダイアログから選択結果 ("run" / "wait" / "skip") を受け取る。"""
+        with self._foreground_lock:
+            self._foreground_choice = choice
+
+    def set_foreground_check_interval_min(self, minutes: float) -> None:
+        """前面化確認の再表示間隔（分）。0 でキャッシュ無効。"""
+        with self._foreground_lock:
+            self._fg_cache_seconds = max(0.0, float(minutes) * 60.0)
+
+    def _request_foreground_confirm(self, scene_name: str) -> str:
+        """UI スレッドへダイアログ表示を依頼し、結果を返す。"""
+        with self._foreground_lock:
+            self._foreground_choice = "run"   # タイムアウト時の既定
+        done = threading.Event()
+        self.foreground_confirm_request.emit(scene_name, done)
+        # UI がダイアログを閉じるまで待機（スレッドはバックグラウンド）
+        # stop イベントが先に立てば一旦抜けて skip 扱い
+        while not done.is_set():
+            if self._stop_event.is_set():
+                return "skip"
+            if done.wait(timeout=0.5):
+                break
+        with self._foreground_lock:
+            return self._foreground_choice
+
+    def _sleep_with_stop(self, secs: float) -> bool:
+        """sleep 中に stop_event が立ったら早期復帰。中断時 False。"""
+        deadline = time.monotonic() + secs
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                return False
+            time.sleep(0.5)
+        return True
+
+    def _ensure_foreground_or_choose(self, scene_label: str) -> bool:
+        """シーン実行前の前面チェック。続行可能なら True、ユーザーがスキップ選択で False。
+
+        前面でなければユーザーへ確認ダイアログ。
+        - run: 前面化 → 続行
+        - wait: 3 分待機 → 再評価（再帰せずループ）
+        - skip: 中止
+        - タイムアウト (30 秒): run と同じ
+
+        直近の選択 (run / skip) は `_fg_cache_seconds` の間キャッシュされ、
+        その間に再度この関数が呼ばれた場合はダイアログを再表示せず自動適用する。
+        ウォッチャーが秒単位で発火する場合に、毎回ダイアログが出ないようにするため。
+        """
+        if not self._window_title:
+            return True
+        while True:
+            hwnd = find_hwnd_by_title(self._window_title)
+            if not hwnd:
+                # ウィンドウが見つからない時は前面チェックを諦めて先に進む
+                # （run_pc_scene 側で改めてエラー扱いされる）
+                return True
+            if is_window_foreground(hwnd):
+                return True
+
+            # キャッシュ判定: 直近に出した選択が有効期限内なら自動適用
+            with self._foreground_lock:
+                cache_sec = self._fg_cache_seconds
+                last_choice = self._fg_last_choice
+                last_mono = self._fg_last_decision_mono
+            if (
+                cache_sec > 0
+                and last_choice in ("run", "skip")
+                and (time.monotonic() - last_mono) < cache_sec
+            ):
+                remain = int(cache_sec - (time.monotonic() - last_mono))
+                if last_choice == "run":
+                    self._log(
+                        f"⚠ 非前面 — キャッシュ「即時実施」を自動適用 "
+                        f"(あと {remain}s で再確認)"
+                    )
+                    if bring_window_to_foreground(hwnd):
+                        self._log("✓ 対象ウィンドウを前面化しました")
+                    return True
+                else:  # skip
+                    self._log(
+                        f"⊘ 非前面 — キャッシュ「スキップ」を自動適用 "
+                        f"(あと {remain}s で再確認)"
+                    )
+                    return False
+
+            self._log("⚠ 対象ウィンドウが前面にありません — ユーザー確認待ち")
+            choice = self._request_foreground_confirm(scene_label)
+            if self._stop_event.is_set():
+                return False
+            if choice == "run":
+                with self._foreground_lock:
+                    self._fg_last_choice = "run"
+                    self._fg_last_decision_mono = time.monotonic()
+                if bring_window_to_foreground(hwnd):
+                    self._log("✓ 対象ウィンドウを前面化しました")
+                else:
+                    self._log("⚠ 前面化に失敗 — そのまま続行します")
+                return True
+            if choice == "skip":
+                with self._foreground_lock:
+                    self._fg_last_choice = "skip"
+                    self._fg_last_decision_mono = time.monotonic()
+                self._log("⊘ ユーザー選択によりシーン実行をスキップ")
+                return False
+            if choice == "wait":
+                # wait はキャッシュ対象外（毎回再評価）
+                self._log("⏸ 3 分待機して再評価します")
+                from .foreground_dialog import WAIT_SLEEP_SECONDS
+                if not self._sleep_with_stop(WAIT_SLEEP_SECONDS):
+                    return False
+                # 待機後、while 先頭に戻って再評価
+                continue
+            # 想定外の値は run 扱い
+            return True
 
     def _run_scene(self, path: str) -> bool:
         # scenes/ プレフィックスが二重にならないよう正規化
@@ -462,7 +771,17 @@ class PcFlowRunner(QObject):
                         with self._fired_lock:
                             self._fired_queue.append((w, info))
                         self._watcher_pending.set()
-                        self._log(f"🔥 ウォッチャー発火: [{w.title}] {info}")
+                        try:
+                            today_count, fired_at = record_watcher_fire(w.id)
+                        except Exception:
+                            today_count, fired_at = 0, ""
+                        self._log(
+                            f"🔥 ウォッチャー発火: [{w.title}] {info} "
+                            f"(本日 {today_count} 回目)"
+                        )
+                        self.watcher_fired_visual.emit(
+                            w.id, w.title, today_count, fired_at,
+                        )
                         self._notify_watcher_fired(w, info)
                 else:
                     self._hit_counts[w.id] = 0
@@ -531,6 +850,11 @@ class PcFlowRunner(QObject):
     def _handle_fired(self, w: PcWatcher, info: str) -> str:
         """発火を1件処理して、after アクション文字列を返す。"""
         if w.handler:
+            handler_label = os.path.splitext(os.path.basename(w.handler))[0]
+            # ハンドラー実行直前にも前面化チェック（ユーザー操作中の暴発を防ぐ）
+            if not self._ensure_foreground_or_choose(handler_label):
+                self._log("⊘ ハンドラー実行をスキップ（前面化キャンセル）")
+                return "noop"
             self._watcher_paused.set()
             try:
                 self._log(f"ハンドラー実行: {w.handler}")
@@ -596,8 +920,23 @@ class PcFlowRunner(QObject):
                     if action == "stop":
                         self._log("after=stop によりフロー停止")
                         break
-                    # restart_scene / next_scene はシーン実行中の中断時に意味を持つ
-                    # シーン外（待機中）なら after は noop と同じ扱い
+                    if action == "restart_scene":
+                        # シーン外で restart_scene が要求された場合のフォールバック:
+                        # 当日（深夜跨ぎ含む）の直近スケジュールエントリへ戻る
+                        fb = last_due_scenes(flow, datetime.now())
+                        if fb is not None:
+                            fb_entry, fb_scenes = fb
+                            self._log(
+                                f"after=restart_scene: 未実行のため直近スケジュール "
+                                f"{fb_entry.time} → {fb_scenes} を実行"
+                            )
+                            if not self._run_scenes_with_watcher(fb_scenes):
+                                break
+                        else:
+                            self._log(
+                                "after=restart_scene: 直近スケジュールが見つからずスキップ"
+                            )
+                    # next_scene はシーン外では noop と同じ扱い
                     continue
 
                 result = check_schedule(flow, datetime.now(), last_fired)
@@ -656,6 +995,11 @@ class PcFlowRunner(QObject):
             if self._stop_event.is_set():
                 return True
             path = scenes[k]
+            scene_label = os.path.splitext(os.path.basename(path))[0]
+            # シーン実行直前に対象ウィンドウの前面化チェック（ユーザー確認あり）
+            if not self._ensure_foreground_or_choose(scene_label):
+                k += 1
+                continue
             self._log(f"シーン実行 [{k+1}/{len(scenes)}]: {path}")
             self._run_scene(path)
             # シーン終了後（または発火による中断後）、発火キューを処理

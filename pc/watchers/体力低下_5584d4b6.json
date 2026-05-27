@@ -1,0 +1,27 @@
+{
+  "id": "5584d4b6",
+  "title": "体力低下",
+  "enabled": true,
+  "priority": 0,
+  "condition": {
+    "type": "ocr_number",
+    "template": "watcher_templates/5584d4b6.png",
+    "region": [
+      0.0783,
+      0.9548,
+      0.0305,
+      0.0136
+    ],
+    "threshold": 0.85,
+    "ocr_whitelist": "0123456789",
+    "op": "<=",
+    "value": 8000.0,
+    "consecutive": 5
+  },
+  "handler": "",
+  "after": "noop",
+  "cooldown_s": 60.0,
+  "alert_desktop": false,
+  "poll_min_s": 1.0,
+  "poll_max_s": 4.0
+}

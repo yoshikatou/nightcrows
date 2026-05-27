@@ -21,12 +21,13 @@ import threading
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QPainter
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -34,16 +35,24 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
+    QSplitter,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -55,14 +64,19 @@ from .pc_flow import (
     DAY_NAMES,
     FLOWS_DIR,
     PcFlowRunner,
+    ScheduleEntry,
     entry_scenes,
     load_pc_flow,
+    save_pc_flow,
 )
-from .pc_flow_editor import FlowEditorWindow
+from .pc_flow_editor import FlowEditorWindow, _EntryDialog
+from .foreground_dialog import ForegroundConfirmDialog
+from .flow_overlay import FlowOverlay
 from .pc_scene import SCENES_DIR, load_pc_scene
 from .pc_scene_editor import SceneEditorWindow
 from .pc_watcher import WATCHERS_DIR, load_pc_watcher, save_pc_watcher
 from .pc_watcher_editor import WatcherEditorWindow
+from .watcher_counts import load_counts as load_watcher_counts
 from .notify import send_google_chat
 from .recorder import RECORDINGS_DIR, WindowRecorder
 from .widgets import ReorderableListWidget
@@ -81,6 +95,9 @@ class PcFlowWindow(QWidget):
     """PC フロー制御メインウィンドウ（縦長タブ構成）。"""
 
     _test_log_signal = Signal(str)   # 別スレッドからテストログを安全に表示するため
+    _tr_chat_signal  = Signal(str)   # 翻訳タブのチャット欄追記
+    _tr_user_signal  = Signal(str)   # 翻訳タブのユーザー欄追記
+    _tr_user_busy_signal = Signal(bool)   # ユーザー翻訳ボタンの有効/無効
 
     def __init__(self, settings: dict) -> None:
         super().__init__()
@@ -90,7 +107,14 @@ class PcFlowWindow(QWidget):
 
         self.setWindowTitle("PC フロー制御")
         self.setMinimumWidth(360)
-        self.resize(480, 900)
+        # 画面の利用可能高さに収める（タスクバー等を除いた領域）。
+        # タイトルバー分のマージンを引いて、ウィンドウ枠まで含めて画面に収まるようにする。
+        screen = QApplication.primaryScreen()
+        avail_h = screen.availableGeometry().height() if screen else 1000
+        max_h = max(400, avail_h - 60)
+        target_h = min(900, max(600, max_h))
+        self.resize(480, target_h)
+        self.setMaximumHeight(max_h)
 
         self._build_ui()
         self._connect_signals()
@@ -120,12 +144,13 @@ class PcFlowWindow(QWidget):
 
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.North)
-        self._tabs.addTab(self._build_tab_run(),     "実行")
-        self._tabs.addTab(self._build_tab_test(),    "テスト")
-        self._tabs.addTab(self._build_tab_watcher(), "見張り")
-        self._tabs.addTab(self._build_tab_editor(),  "作成")
-        self._tabs.addTab(self._build_tab_record(),  "録画")
-        self._tabs.addTab(self._build_tab_log(),     "ログ")
+        self._tabs.addTab(self._build_tab_run(),         "実行")
+        self._tabs.addTab(self._build_tab_test(),        "テスト")
+        self._tabs.addTab(self._build_tab_watcher(),     "見張り")
+        self._tabs.addTab(self._build_tab_editor(),      "作成")
+        self._tabs.addTab(self._build_tab_record(),      "録画")
+        self._tabs.addTab(self._build_tab_translation(), "翻訳")
+        self._tabs.addTab(self._build_tab_log(),         "ログ")
         outer.addWidget(self._tabs, 1)
 
         # 下部: 設定・終了ボタン
@@ -201,8 +226,11 @@ class PcFlowWindow(QWidget):
         self._combo_flow = QComboBox()
         self._combo_flow.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._combo_flow.currentIndexChanged.connect(self._on_flow_selected)
-        self._btn_flow = QPushButton("開始")
-        self._btn_flow.setFixedWidth(60)
+        self._btn_flow = QPushButton("▶ 開始")
+        self._btn_flow.setFixedWidth(72)
+        self._btn_flow.setStyleSheet(
+            "QPushButton{background:#2e7d32;color:white;font-weight:bold;}"
+        )
         self._btn_flow.clicked.connect(self._toggle_flow)
         flow_row.addWidget(QLabel("フロー:"))
         flow_row.addWidget(self._combo_flow, 1)
@@ -234,9 +262,22 @@ class PcFlowWindow(QWidget):
         day_row.addWidget(self._btn_day_today)
         lay.addLayout(day_row)
 
-        self._list_sched = QListWidget()
-        self._list_sched.setStyleSheet("font-size:12px;")
-        lay.addWidget(self._list_sched, 1)
+        # 1時間刻み × 1列の本日フロー表（現在時刻に赤線、全体フローと同じ動作）
+        self._sched_table = _RunDayTable()
+        self._sched_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._sched_table.customContextMenuRequested.connect(
+            self._on_sched_table_context_menu
+        )
+        self._sched_table.cellDoubleClicked.connect(
+            self._on_sched_table_double_clicked
+        )
+        lay.addWidget(self._sched_table, 1)
+
+        sched_hint = QLabel(
+            "ダブルクリックで編集 / 右クリックで単発実行できます（時刻は 1 分単位）。"
+        )
+        sched_hint.setStyleSheet("color:#666; font-size:11px;")
+        lay.addWidget(sched_hint)
 
         self._lbl_next_sched = QLabel("")
         self._lbl_next_sched.setStyleSheet("color:#1565c0; font-size:12px;")
@@ -253,9 +294,17 @@ class PcFlowWindow(QWidget):
 
     # ---- テストタブ（カーソル移動 / クリック）
     def _build_tab_test(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(6, 8, 6, 6)
+        # 上下分割: コントロール群（縦スクロール可） / 実行結果ログ。
+        # ユーザーがスプリッタをドラッグして配分を変えられる。
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(6, 8, 6, 6)
+        outer_lay.setSpacing(4)
+
+        # 上部: コントロールを QScrollArea に詰める
+        controls = QWidget()
+        lay = QVBoxLayout(controls)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
         # 共通の座標入力
@@ -390,7 +439,7 @@ class PcFlowWindow(QWidget):
         lay.addWidget(drag_grp)
 
         # 3 点連続クリックテスト
-        seq_grp = QGroupBox("連続クリック検証 (目標 → 開始 → 終了 の 3 点を順次)")
+        seq_grp = QGroupBox("連続クリック検証 (3 点を順次クリック)")
         seq_lay = QVBoxLayout(seq_grp)
         seq_lay.setContentsMargins(8, 6, 8, 6)
         seq_lay.setSpacing(4)
@@ -406,6 +455,29 @@ class PcFlowWindow(QWidget):
         seq_wait_row.addWidget(self._spin_seq_wait)
         seq_wait_row.addStretch(1)
         seq_lay.addLayout(seq_wait_row)
+
+        # 3 点それぞれの座標入力（このセクション専用、他のフィールドと独立）
+        self._seq_inputs: list[tuple[QLineEdit, QLineEdit]] = []
+        for idx in range(1, 4):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"{idx}点目  X:"))
+            ix = QLineEdit()
+            ix.setValidator(QIntValidator(-10000, 10000, self))
+            ix.setFixedWidth(60)
+            iy = QLineEdit()
+            iy.setValidator(QIntValidator(-10000, 10000, self))
+            iy.setFixedWidth(60)
+            row.addWidget(ix)
+            row.addWidget(QLabel("Y:"))
+            row.addWidget(iy)
+            btn_cap = QPushButton("取得")
+            btn_cap.setToolTip(f"次のクリック位置を {idx} 点目に記録（右クリック・ESC で中断）")
+            btn_cap.clicked.connect(lambda _checked=False, i=idx: self._start_capture_seq(i))
+            row.addWidget(btn_cap)
+            row.addStretch(1)
+            seq_lay.addLayout(row)
+            self._seq_inputs.append((ix, iy))
+
         self._btn_seq_hid = QPushButton("A: HID 直接で 3 点連続クリック (click_at)")
         self._btn_seq_hid.setToolTip(
             "毎回 HID 相対移動で目標へ動かしてクリック。確実だが少し遅い。"
@@ -424,15 +496,39 @@ class PcFlowWindow(QWidget):
         seq_lay.addWidget(self._btn_seq_park)
         lay.addWidget(seq_grp)
 
-        # ログ
-        lay.addWidget(QLabel("実行結果:"))
+        lay.addStretch(1)   # コントロール下部の余白
+
+        # コントロールを縦スクロール可能なエリアに格納
+        scroll = QScrollArea()
+        scroll.setWidget(controls)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        # 下部: 実行結果ログ
+        log_w = QWidget()
+        log_lay = QVBoxLayout(log_w)
+        log_lay.setContentsMargins(0, 0, 0, 0)
+        log_lay.setSpacing(4)
+        log_lay.addWidget(QLabel("実行結果:"))
         self._test_log = QTextEdit()
         self._test_log.setReadOnly(True)
         self._test_log.setStyleSheet(
             "font-family: Consolas, monospace; font-size: 12px;"
         )
-        lay.addWidget(self._test_log, 1)
-        return w
+        log_lay.addWidget(self._test_log, 1)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(scroll)
+        splitter.addWidget(log_w)
+        # 初期は上 60% / 下 40%（ログを今までより広めに）
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([360, 280])
+
+        outer_lay.addWidget(splitter, 1)
+        return outer
 
     # ---- 見張りタブ: ウォッチャー一覧 + 編集起動（別ウィンドウ）
     def _build_tab_watcher(self) -> QWidget:
@@ -442,6 +538,9 @@ class PcFlowWindow(QWidget):
         lay.setSpacing(6)
 
         lay.addWidget(QLabel("ウォッチャー一覧（チェックで有効／無効切替）:"))
+        self._lbl_watcher_today = QLabel("本日の発火")
+        self._lbl_watcher_today.setStyleSheet("color:#555; font-size:11px;")
+        lay.addWidget(self._lbl_watcher_today)
         self._list_watchers = QListWidget()
         self._list_watchers.itemDoubleClicked.connect(
             lambda _i: self._open_watcher_editor()
@@ -467,7 +566,8 @@ class PcFlowWindow(QWidget):
 
         hint = QLabel(
             "編集は別ウィンドウで開きます。"
-            "現フェーズではフロー実行と連動せず、編集画面内の単独テストで動作確認。"
+            "フロー実行中はバックグラウンドで監視され、発火時に行が黄色く点滅します。"
+            "本日の発火回数はアプリ再起動後も引き継がれ、深夜 0 時に自動リセットされます。"
         )
         hint.setStyleSheet("color:#666; font-size:11px;")
         hint.setWordWrap(True)
@@ -507,6 +607,17 @@ class PcFlowWindow(QWidget):
         btn_row.addWidget(btn_dup)
         btn_row.addWidget(btn_del)
         lay.addLayout(btn_row)
+
+        # 単発実行ボタン（緑、強調）
+        self._btn_run_scene = QPushButton("▶ 選択シーンを実行")
+        self._btn_run_scene.setStyleSheet(
+            "QPushButton{background:#2e7d32;color:white;font-weight:bold;}"
+        )
+        self._btn_run_scene.setToolTip(
+            "選択中のシーンを単発で実行します。スケジュール実行中は使えません。"
+        )
+        self._btn_run_scene.clicked.connect(self._run_selected_scene)
+        lay.addWidget(self._btn_run_scene)
 
         btn_refresh = QPushButton("一覧更新")
         btn_refresh.clicked.connect(self._reload_scenes_list)
@@ -612,6 +723,33 @@ class PcFlowWindow(QWidget):
         if item is None:
             return None
         return item.data(Qt.UserRole)
+
+    def _run_selected_scene(self) -> None:
+        """作成タブで選択中のシーンを単発実行する。"""
+        path = self._selected_scene_path()
+        if not path:
+            self._append_log("⚠ シーンが選択されていません")
+            return
+        if self._runner.is_busy:
+            QMessageBox.information(
+                self, "実行中",
+                "スケジュール実行または単発実行が進行中です。先に停止してください。",
+            )
+            return
+        if self._mouse is None:
+            ans = QMessageBox.question(
+                self, "Pico 未接続",
+                "Pico マウス未接続です。tap/swipe 系のステップはスキップされます。\n"
+                "続行しますか？",
+            )
+            if ans != QMessageBox.Yes:
+                return
+        # ランナーに対象ウィンドウ・マウスを反映してから実行
+        self._runner.set_window_title(self._settings.get("window_title", ""))
+        self._runner.set_mouse(self._mouse)
+        fname = os.path.basename(path)
+        if not self._runner.run_scene_async(fname):
+            self._append_log("⚠ 単発実行を受け付けられませんでした（既に実行中？）")
 
     def _open_scene_editor(self) -> None:
         path = self._selected_scene_path()
@@ -736,6 +874,10 @@ class PcFlowWindow(QWidget):
         self._list_watchers.blockSignals(True)
         try:
             self._list_watchers.clear()
+            counts_state = load_watcher_counts()
+            counts = counts_state.get("counts", {})
+            last_fired = counts_state.get("last_fired", {})
+            self._lbl_watcher_today.setText(f"本日 ({counts_state.get('date','')}) の発火")
             if not os.path.isdir(WATCHERS_DIR):
                 return
             for fname in sorted(os.listdir(WATCHERS_DIR)):
@@ -746,14 +888,58 @@ class PcFlowWindow(QWidget):
                     w = load_pc_watcher(path)
                 except Exception:
                     continue
-                label = f"{w.title or fname}  [{w.condition.type}]"
+                cnt = int(counts.get(w.id, 0))
+                tlast = last_fired.get(w.id, "")
+                label = self._fmt_watcher_label(w.title or fname, w.condition.type, cnt, tlast)
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, path)
+                item.setData(Qt.UserRole + 1, w.id)
+                item.setData(Qt.UserRole + 2, w.title or fname)
+                item.setData(Qt.UserRole + 3, w.condition.type)
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked if w.enabled else Qt.Unchecked)
                 self._list_watchers.addItem(item)
         finally:
             self._list_watchers.blockSignals(False)
+
+    @staticmethod
+    def _fmt_watcher_label(title: str, type_: str, count: int, last_time: str) -> str:
+        if count > 0:
+            tail = f"  本日 {count}回"
+            if last_time:
+                # HH:MM:SS → HH:MM に切り詰めて表示幅を抑える
+                tail += f" / 最終 {last_time[:5]}"
+        else:
+            tail = "  本日 0回"
+        return f"{title}  [{type_}]{tail}"
+
+    def _on_watcher_fired_visual(
+        self, watcher_id: str, title: str, count: int, fired_at: str,
+    ) -> None:
+        """ウォッチャー発火時に「見張り」タブのリスト行を更新 + 黄色ハイライト。"""
+        if not watcher_id:
+            return
+        target_item: QListWidgetItem | None = None
+        for i in range(self._list_watchers.count()):
+            it = self._list_watchers.item(i)
+            if it.data(Qt.UserRole + 1) == watcher_id:
+                target_item = it
+                break
+        if target_item is None:
+            # 新規ウォッチャーや一覧未反映の場合は次回 reload で拾われる
+            return
+        type_ = target_item.data(Qt.UserRole + 3) or ""
+        target_item.setText(self._fmt_watcher_label(title, type_, count, fired_at))
+        target_item.setBackground(QBrush(QColor("#fff176")))   # 黄
+        # 3 秒後にハイライト解除
+        QTimer.singleShot(3000, lambda it=target_item: self._clear_watcher_highlight(it))
+
+    def _clear_watcher_highlight(self, item: QListWidgetItem) -> None:
+        # 別 reload で item が破棄されている可能性に備える
+        try:
+            item.setBackground(QBrush())
+        except RuntimeError:
+            pass
 
     def _on_watcher_item_changed(self, item: QListWidgetItem) -> None:
         """一覧のチェックボックスで有効/無効を即トグルし JSON を更新する。"""
@@ -958,6 +1144,393 @@ class PcFlowWindow(QWidget):
         except Exception as e:
             self._append_log(f"⚠ フォルダオープン失敗: {e}")
 
+    # ---- 翻訳タブ: 領域の定期キャプチャ → Claude API 翻訳、ユーザー入力翻訳
+    def _build_tab_translation(self) -> QWidget:
+        from .translation import LANG_CODES, LANG_LABELS_JA
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(6, 8, 6, 6)
+        outer_lay.setSpacing(4)
+
+        # 監視領域
+        rgn_grp = QGroupBox("監視領域 (チャット欄をスクショ → 翻訳)")
+        rgn_lay = QVBoxLayout(rgn_grp)
+        rgn_lay.setContentsMargins(8, 6, 8, 6)
+        rgn_lay.setSpacing(4)
+
+        self._lbl_tr_region = QLabel(self._fmt_tr_region())
+        self._lbl_tr_region.setStyleSheet("color:#555; font-size:11px;")
+        self._lbl_tr_region.setWordWrap(True)
+        rgn_lay.addWidget(self._lbl_tr_region)
+
+        rgn_btn_row = QHBoxLayout()
+        btn_pick = QPushButton("📐 画面から領域選択")
+        btn_pick.setToolTip("ゲームウィンドウのスクショからドラッグで領域を指定")
+        btn_pick.clicked.connect(self._tr_pick_region)
+        rgn_btn_row.addWidget(btn_pick)
+
+        btn_clear_rgn = QPushButton("クリア")
+        btn_clear_rgn.setToolTip("領域指定を消す")
+        btn_clear_rgn.clicked.connect(self._tr_clear_region)
+        rgn_btn_row.addWidget(btn_clear_rgn)
+        rgn_btn_row.addStretch(1)
+        rgn_lay.addLayout(rgn_btn_row)
+
+        # 間隔 + 開始/停止
+        ctl_row = QHBoxLayout()
+        ctl_row.addWidget(QLabel("間隔:"))
+        self._spin_tr_interval = QDoubleSpinBox()
+        self._spin_tr_interval.setRange(1.0, 600.0)
+        self._spin_tr_interval.setSingleStep(1.0)
+        self._spin_tr_interval.setDecimals(1)
+        self._spin_tr_interval.setSuffix(" 秒")
+        self._spin_tr_interval.setFixedWidth(96)
+        self._spin_tr_interval.setValue(
+            float(self._settings.get("translation_interval_s", 5.0))
+        )
+        ctl_row.addWidget(self._spin_tr_interval)
+        ctl_row.addStretch(1)
+        self._btn_tr_toggle = QPushButton("▶ 開始")
+        self._btn_tr_toggle.setFixedWidth(80)
+        self._btn_tr_toggle.setStyleSheet(
+            "QPushButton{background:#2e7d32;color:white;font-weight:bold;}"
+        )
+        self._btn_tr_toggle.clicked.connect(self._tr_toggle_loop)
+        ctl_row.addWidget(self._btn_tr_toggle)
+        rgn_lay.addLayout(ctl_row)
+
+        outer_lay.addWidget(rgn_grp)
+
+        # スプリッタ: 上=チャット翻訳ログ / 下=ユーザー入力翻訳
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+
+        # 上: チャット翻訳ログ
+        chat_w = QWidget()
+        chat_lay = QVBoxLayout(chat_w)
+        chat_lay.setContentsMargins(0, 0, 0, 0)
+        chat_lay.setSpacing(2)
+        chat_lay.addWidget(QLabel("チャット翻訳ログ:"))
+        self._tr_chat_log = QPlainTextEdit()
+        self._tr_chat_log.setReadOnly(True)
+        self._tr_chat_log.setStyleSheet(
+            "font-family: Consolas, 'Yu Gothic UI', sans-serif; font-size: 12px;"
+        )
+        chat_lay.addWidget(self._tr_chat_log, 1)
+        chat_btns = QHBoxLayout()
+        chat_btns.addStretch(1)
+        btn_chat_clear = QPushButton("クリア")
+        btn_chat_clear.clicked.connect(self._tr_chat_log.clear)
+        chat_btns.addWidget(btn_chat_clear)
+        chat_lay.addLayout(chat_btns)
+        splitter.addWidget(chat_w)
+
+        # 下: ユーザー入力翻訳
+        usr_w = QWidget()
+        usr_lay = QVBoxLayout(usr_w)
+        usr_lay.setContentsMargins(0, 0, 0, 0)
+        usr_lay.setSpacing(2)
+        usr_lay.addWidget(QLabel("自分の発言を翻訳:"))
+        self._tr_user_input = QPlainTextEdit()
+        self._tr_user_input.setPlaceholderText(
+            "翻訳したいテキストを入力 (Ctrl+Enter で翻訳実行)"
+        )
+        self._tr_user_input.setFixedHeight(80)
+        self._tr_user_input.setStyleSheet(
+            "font-family: 'Yu Gothic UI', sans-serif; font-size: 12px;"
+        )
+        # Ctrl+Enter で翻訳
+        self._tr_user_input.installEventFilter(self)
+        usr_lay.addWidget(self._tr_user_input)
+
+        tgt_row = QHBoxLayout()
+        tgt_row.addWidget(QLabel("対象:"))
+        cur_targets = set(self._settings.get("translation_user_targets") or [])
+        self._tr_target_checks: dict[str, QCheckBox] = {}
+        for code in LANG_CODES:
+            cb = QCheckBox(f"{LANG_LABELS_JA[code]}")
+            cb.setChecked(code in cur_targets)
+            cb.stateChanged.connect(self._tr_save_targets)
+            tgt_row.addWidget(cb)
+            self._tr_target_checks[code] = cb
+        tgt_row.addStretch(1)
+        usr_lay.addLayout(tgt_row)
+
+        run_row = QHBoxLayout()
+        run_row.addStretch(1)
+        self._btn_tr_user_translate = QPushButton("翻訳")
+        self._btn_tr_user_translate.setFixedWidth(80)
+        self._btn_tr_user_translate.clicked.connect(self._tr_translate_user)
+        run_row.addWidget(self._btn_tr_user_translate)
+        usr_lay.addLayout(run_row)
+
+        usr_lay.addWidget(QLabel("翻訳結果:"))
+        self._tr_user_output = QPlainTextEdit()
+        self._tr_user_output.setReadOnly(True)
+        self._tr_user_output.setStyleSheet(
+            "font-family: Consolas, 'Yu Gothic UI', sans-serif; font-size: 12px;"
+        )
+        usr_lay.addWidget(self._tr_user_output, 1)
+        splitter.addWidget(usr_w)
+
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([320, 240])
+        outer_lay.addWidget(splitter, 1)
+
+        # 内部状態
+        self._tr_thread = None
+        self._tr_stop = threading.Event()
+        # 別スレッド → メインへの安全なテキスト追記 / ボタン状態
+        self._tr_chat_signal.connect(self._tr_chat_append)
+        self._tr_user_signal.connect(self._tr_user_append)
+        self._tr_user_busy_signal.connect(
+            lambda busy: self._btn_tr_user_translate.setEnabled(not busy)
+        )
+        return outer
+
+    # ---- 翻訳タブのヘルパー --------------------------------------------
+    def _fmt_tr_region(self) -> str:
+        r = self._settings.get("translation_region")
+        if not r or len(r) != 4:
+            return "領域: （未設定）— 「画面から領域選択」で指定してください"
+        return (
+            f"領域(比率): x={r[0]:.4f} y={r[1]:.4f} w={r[2]:.4f} h={r[3]:.4f}"
+        )
+
+    def _tr_pick_region(self) -> None:
+        from .region_picker import RegionPickerDialog
+        title = self._settings.get("window_title", "")
+        if not title:
+            QMessageBox.warning(
+                self, "ウィンドウ未指定",
+                "先にヘッダーで対象ゲームウィンドウを選択してください。",
+            )
+            return
+        cur = self._settings.get("translation_region")
+        dlg = RegionPickerDialog(
+            title,
+            current_rel=cur if cur and len(cur) == 4 else None,
+            parent=self,
+            dialog_title="チャット監視領域を選択",
+            hint_text=(
+                "ゲームウィンドウのスクショからチャット欄をドラッグで囲んでください。\n"
+                "ホイール=ズーム / 右ドラッグ=パン / 領域はウィンドウサイズ比率で保存します。"
+            ),
+        )
+        if dlg.exec():
+            rel = dlg.get_rel()
+            if rel and len(rel) == 4:
+                self._settings["translation_region"] = rel
+                save_settings(self._settings)
+                self._lbl_tr_region.setText(self._fmt_tr_region())
+
+    def _tr_clear_region(self) -> None:
+        self._settings["translation_region"] = None
+        save_settings(self._settings)
+        self._lbl_tr_region.setText(self._fmt_tr_region())
+
+    def _tr_save_targets(self) -> None:
+        targets = [
+            code for code, cb in self._tr_target_checks.items() if cb.isChecked()
+        ]
+        self._settings["translation_user_targets"] = targets
+        save_settings(self._settings)
+
+    def _tr_toggle_loop(self) -> None:
+        if self._tr_thread and self._tr_thread.is_alive():
+            self._tr_stop.set()
+            self._btn_tr_toggle.setText("▶ 開始")
+            self._btn_tr_toggle.setStyleSheet(
+                "QPushButton{background:#2e7d32;color:white;font-weight:bold;}"
+            )
+            self._tr_chat_signal.emit("--- 翻訳ループ停止 ---")
+            return
+        # 起動前チェック
+        key = (self._settings.get("translation_api_key") or "").strip()
+        if not key:
+            QMessageBox.warning(
+                self, "API キー未設定",
+                "設定で Claude API キーを入力してください。",
+            )
+            return
+        region = self._settings.get("translation_region")
+        if not region or len(region) != 4:
+            QMessageBox.warning(
+                self, "領域未指定",
+                "監視領域を選択してください（「画面から領域選択」ボタン）。",
+            )
+            return
+        title = self._settings.get("window_title", "")
+        if not title:
+            QMessageBox.warning(
+                self, "ウィンドウ未指定",
+                "ヘッダーで対象ゲームウィンドウを選択してください。",
+            )
+            return
+        # 間隔を保存
+        self._settings["translation_interval_s"] = float(self._spin_tr_interval.value())
+        save_settings(self._settings)
+
+        self._tr_stop.clear()
+        self._tr_thread = threading.Thread(
+            target=self._tr_loop_worker, daemon=True,
+        )
+        self._tr_thread.start()
+        self._btn_tr_toggle.setText("■ 停止")
+        self._btn_tr_toggle.setStyleSheet(
+            "QPushButton{background:#c62828;color:white;font-weight:bold;}"
+        )
+        self._tr_chat_signal.emit(
+            f"--- 翻訳ループ開始 (間隔 {self._spin_tr_interval.value():.1f}s) ---"
+        )
+
+    def _tr_loop_worker(self) -> None:
+        """別スレッド: 一定間隔で監視領域をキャプチャ → Claude API → ログ追記。"""
+        from .capture import capture_window
+        from .translation import TranslationClient, LANG_LABELS_JA
+        import cv2
+
+        key = (self._settings.get("translation_api_key") or "").strip()
+        base = (self._settings.get("translation_base_lang") or "ja").lower()
+        try:
+            client = TranslationClient(api_key=key)
+        except ImportError as e:
+            self._tr_chat_signal.emit(f"⚠ {e}")
+            return
+        title = self._settings.get("window_title", "")
+        interval = max(1.0, float(self._spin_tr_interval.value()))
+
+        while not self._tr_stop.is_set():
+            hwnd = find_hwnd_by_title(title) if title else None
+            if not hwnd:
+                self._tr_chat_signal.emit("⚠ 対象ウィンドウが見つかりません")
+                # 短く待って再試行
+                self._tr_sleep(min(interval, 3.0))
+                continue
+            img = capture_window(hwnd)
+            if img is None:
+                self._tr_sleep(interval)
+                continue
+            region = self._settings.get("translation_region")
+            if not region or len(region) != 4:
+                self._tr_chat_signal.emit("⚠ 領域未指定（停止します）")
+                break
+            ih, iw = img.shape[:2]
+            rx, ry, rw, rh = region
+            x0 = max(0, int(rx * iw))
+            y0 = max(0, int(ry * ih))
+            x1 = min(iw, int((rx + rw) * iw))
+            y1 = min(ih, int((ry + rh) * ih))
+            if x1 <= x0 or y1 <= y0:
+                self._tr_chat_signal.emit("⚠ 領域サイズが不正")
+                self._tr_sleep(interval)
+                continue
+            crop = img[y0:y1, x0:x1]
+            ok, buf = cv2.imencode(".png", crop)
+            if not ok:
+                self._tr_sleep(interval)
+                continue
+            try:
+                msgs = client.translate_image(bytes(buf), base)
+            except Exception as e:
+                self._tr_chat_signal.emit(f"⚠ API 例外: {e}")
+                self._tr_sleep(interval)
+                continue
+            if msgs:
+                ts = datetime.now().strftime("%H:%M:%S")
+                lines: list[str] = []
+                for m in msgs:
+                    lang = m.get("lang", "?")
+                    orig = m.get("original", "")
+                    trans = m.get("translated")
+                    lang_label = LANG_LABELS_JA.get(lang, lang)
+                    lines.append(f"[{ts}] [{lang_label}] {orig}")
+                    if trans:
+                        lines.append(f"    → [{LANG_LABELS_JA.get(base, base)}] {trans}")
+                self._tr_chat_signal.emit("\n".join(lines))
+            self._tr_sleep(interval)
+
+        self._tr_chat_signal.emit("--- 翻訳ループ終了 ---")
+
+    def _tr_sleep(self, secs: float) -> None:
+        """停止フラグを 100ms 毎に確認しつつスリープ。"""
+        end = time.monotonic() + max(0.0, secs)
+        while time.monotonic() < end:
+            if self._tr_stop.is_set():
+                return
+            time.sleep(0.1)
+
+    def _tr_chat_append(self, text: str) -> None:
+        self._tr_chat_log.appendPlainText(text)
+        sb = self._tr_chat_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _tr_user_append(self, text: str) -> None:
+        self._tr_user_output.appendPlainText(text)
+        sb = self._tr_user_output.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        """Ctrl+Enter で翻訳タブのユーザー入力を翻訳実行。"""
+        if (hasattr(self, "_tr_user_input")
+                and obj is self._tr_user_input
+                and event.type() == QEvent.KeyPress):
+            key = event.key()
+            mods = event.modifiers()
+            if (key in (Qt.Key_Return, Qt.Key_Enter)
+                    and (mods & Qt.ControlModifier)):
+                self._tr_translate_user()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _tr_translate_user(self) -> None:
+        text = self._tr_user_input.toPlainText().strip()
+        if not text:
+            return
+        targets = [
+            code for code, cb in self._tr_target_checks.items() if cb.isChecked()
+        ]
+        if not targets:
+            QMessageBox.warning(
+                self, "対象言語未指定",
+                "翻訳先の言語を 1 つ以上チェックしてください。",
+            )
+            return
+        key = (self._settings.get("translation_api_key") or "").strip()
+        if not key:
+            QMessageBox.warning(
+                self, "API キー未設定",
+                "設定で Claude API キーを入力してください。",
+            )
+            return
+        # 別スレッドで API 呼び出し（UI ブロックを避ける）
+        self._tr_user_busy_signal.emit(True)
+        self._tr_user_signal.emit(f"--- 翻訳開始: {text[:40]}{'…' if len(text)>40 else ''} ---")
+
+        def _worker() -> None:
+            from .translation import TranslationClient, LANG_LABELS_JA
+            try:
+                client = TranslationClient(api_key=key)
+                results = client.translate_text(text, targets)
+            except Exception as e:
+                self._tr_user_signal.emit(f"⚠ 例外: {e}")
+                self._tr_user_signal.emit("--- 完了 ---")
+                self._tr_user_busy_signal.emit(False)
+                return
+            ts = datetime.now().strftime("%H:%M:%S")
+            lines = [f"[{ts}] 原文: {text}"]
+            for code in targets:
+                if code in results:
+                    lines.append(f"  [{LANG_LABELS_JA.get(code, code)}] {results[code]}")
+                else:
+                    lines.append(f"  [{LANG_LABELS_JA.get(code, code)}] (取得失敗)")
+            self._tr_user_signal.emit("\n".join(lines))
+            self._tr_user_signal.emit("--- 完了 ---")
+            self._tr_user_busy_signal.emit(False)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     # ---- ログタブ
     def _build_tab_log(self) -> QWidget:
         w = QWidget()
@@ -998,6 +1571,33 @@ class PcFlowWindow(QWidget):
         self._runner.next_schedule_changed.connect(self._lbl_next_sched.setText)
         self._runner.scene_started.connect(self._on_scene_started)
         self._runner.step_updated.connect(self._on_step_updated)
+        self._runner.watcher_fired_visual.connect(self._on_watcher_fired_visual)
+        self._runner.foreground_confirm_request.connect(
+            self._on_foreground_confirm_request
+        )
+
+        # フロー実行中オーバーレイ（半透明・最前面）
+        self._flow_overlay = FlowOverlay()
+        self._flow_overlay.request_stop_flow.connect(self._on_overlay_stop_flow)
+        self._flow_overlay.request_hide.connect(self._on_overlay_hide)
+        self._flow_overlay.moved.connect(self._on_overlay_moved)
+        # ランナーシグナルをオーバーレイへも転送
+        self._runner.scene_started.connect(self._flow_overlay.update_scene)
+        self._runner.step_updated.connect(self._flow_overlay.update_step)
+        self._runner.next_schedule_changed.connect(
+            self._flow_overlay.update_next_schedule
+        )
+        self._runner.state_changed.connect(self._flow_overlay.update_state)
+        self._runner.watcher_fired_visual.connect(
+            self._flow_overlay.show_watcher_fired
+        )
+        # 起動時の位置復元
+        pos = self._settings.get("flow_overlay_pos")
+        if pos and isinstance(pos, (list, tuple)) and len(pos) == 2:
+            try:
+                self._flow_overlay.move(int(pos[0]), int(pos[1]))
+            except (TypeError, ValueError):
+                pass
         self._test_log_signal.connect(self._test_log_append)
 
     # ---------------------------------------------------------------- 設定復元
@@ -1040,9 +1640,22 @@ class PcFlowWindow(QWidget):
                     self._combo_flow.setCurrentIndex(i)
                     break
 
+        # フローを必ずロードする。
+        # _load_flows_list() で blockSignals 中に項目を addItem しているため、内部的に
+        # currentIndex が 0 へ移った状態で signal が抑止される。直後の setCurrentIndex(0)
+        # は「同じ index」扱いで currentIndexChanged が発火せず、_on_flow_selected が
+        # 呼ばれない（結果としてフロー未ロードで実行タブのテーブルが空になる）。
+        # 明示的に現在選択中のインデックスでロードを走らせる。
+        idx = self._combo_flow.currentIndex()
+        if idx >= 0 and self._combo_flow.itemData(idx):
+            self._on_flow_selected(idx)
+
         # 通知設定をランナーへ
         self._runner.set_notify_webhook(
             self._settings.get("google_chat_webhook", "") or ""
+        )
+        self._runner.set_foreground_check_interval_min(
+            float(self._settings.get("foreground_check_interval_min", 5.0))
         )
 
     # ---------------------------------------------------------------- 設定ダイアログ
@@ -1055,6 +1668,15 @@ class PcFlowWindow(QWidget):
             self._runner.set_notify_webhook(
                 self._settings.get("google_chat_webhook", "") or ""
             )
+            self._runner.set_foreground_check_interval_min(
+                float(self._settings.get("foreground_check_interval_min", 5.0))
+            )
+            # オーバーレイ表示の即時反映: 実行中なら ON/OFF を反映する
+            enabled = bool(self._settings.get("flow_overlay_enabled", True))
+            if enabled and self._runner.is_running:
+                self._flow_overlay.show()
+            elif not enabled:
+                self._flow_overlay.hide()
             self._append_log("設定を保存しました")
 
     # ---------------------------------------------------------------- フロー一覧
@@ -1115,20 +1737,24 @@ class PcFlowWindow(QWidget):
             self._lbl_day.setStyleSheet("font-weight:bold; color:#555;")
 
     def _refresh_day_list(self) -> None:
-        """現在の `_displayed_weekday` に該当するエントリだけ並べる。
+        """現在の `_displayed_weekday` に該当するエントリを 24時間 × 1列のテーブルに配置。
 
-        seq エントリは時刻を持たないので、直前の時刻エントリの直後に "→ シーン名" として
-        並べる（schedule リスト順に依存）。
+        - 行: 0〜23 時 (1 時間刻み)
+        - 各エントリは「該当時間の行」に「HH:MM シーン名」として配置
+        - 同じ時間帯に複数エントリがあれば改行で連結
+        - seq（続けて実行）エントリは親エントリと同じセルに "→ シーン" として追記
         """
-        self._list_sched.clear()
+        self._sched_table.clearContents()
+        # 前回拡張された行高さをリセット（今回コンテンツが減っても痕跡が残らないように）
+        for r in range(self._sched_table.HOURS):
+            self._sched_table.setRowHeight(r, self._sched_table.ROW_H)
         flow = self._runner._flow
         if not flow:
             return
         wd = self._displayed_weekday
 
-        # schedule の順序を維持したまま「この曜日に該当する単位」を組み立てる。
-        # 1 単位 = 時刻エントリ + 直後に続く seq エントリ群
-        units: list[tuple[object, list[object]]] = []   # (parent_entry, [seq...])
+        # schedule 順序を保ったまま (parent, [seqs]) を組み立て
+        units: list[tuple[object, list[object]]] = []
         cur_parent = None
         cur_seqs: list = []
         for entry in flow.schedule:
@@ -1138,7 +1764,6 @@ class PcFlowWindow(QWidget):
                 if cur_parent is not None:
                     cur_seqs.append(entry)
                 continue
-            # 通常エントリ: 直前のユニットを確定
             if cur_parent is not None:
                 units.append((cur_parent, cur_seqs))
             cur_parent = entry
@@ -1146,7 +1771,6 @@ class PcFlowWindow(QWidget):
         if cur_parent is not None:
             units.append((cur_parent, cur_seqs))
 
-        # 曜日フィルタ
         def _matches(e) -> bool:
             if e.repeat == "daily":
                 return True
@@ -1160,25 +1784,236 @@ class PcFlowWindow(QWidget):
                     return False
             return False
 
-        # 時刻順にソート
         units = [(p, s) for p, s in units if _matches(p)]
         units.sort(key=lambda u: u[0].time)
+
+        # 同一時間帯に複数ユニットが落ちる場合は改行で連結
         for parent, seqs in units:
+            try:
+                h = int(parent.time.split(":")[0])
+            except (ValueError, AttributeError):
+                continue
+            if not (0 <= h < self._sched_table.HOURS):
+                continue
+
             scenes = entry_scenes(parent)
-            name = os.path.splitext(scenes[0])[0] if scenes else parent.target
-            if parent.repeat == "weekly" and parent.days:
-                days_str = "・".join(DAY_NAMES[d] for d in parent.days)
-            elif parent.repeat == "daily":
-                days_str = "毎日"
-            elif parent.repeat == "once":
-                days_str = parent.date
-            else:
-                days_str = ""
-            self._list_sched.addItem(f"{parent.time}  {name}  ({days_str})")
+            name = (
+                os.path.splitext(scenes[0])[0]
+                if scenes else (parent.target or "(未設定)")
+            )
+            lines = [f"{parent.time} {name}"]
             for seq_entry in seqs:
                 ss = entry_scenes(seq_entry)
-                sname = os.path.splitext(ss[0])[0] if ss else seq_entry.target
-                self._list_sched.addItem(f"   → {sname}  (続けて)")
+                sname = (
+                    os.path.splitext(ss[0])[0]
+                    if ss else (seq_entry.target or "(未設定)")
+                )
+                lines.append(f"   → {sname}")
+            text = "\n".join(lines)
+
+            # このユニット (parent + seqs) が実行する全シーン
+            chain_scenes = list(entry_scenes(parent))
+            for sq in seqs:
+                chain_scenes.extend(entry_scenes(sq))
+
+            existing = self._sched_table.item(h, 0)
+            if existing and existing.text():
+                text = existing.text() + "\n" + text
+                # 既存のチェーンに後続ユニットを連結（右クリック実行用）
+                prev_chains = existing.data(Qt.UserRole) or []
+                merged_chains = list(prev_chains) + [chain_scenes]
+            else:
+                merged_chains = [chain_scenes]
+            item = QTableWidgetItem(text)
+            # 繰り返しタイプで色分け（全体フローと同じ配色）
+            if parent.repeat == "daily":
+                item.setForeground(QBrush(QColor("#1565c0")))
+            elif parent.repeat == "weekly":
+                item.setForeground(QBrush(QColor("#2e7d32")))
+            elif parent.repeat == "once":
+                item.setForeground(QBrush(QColor("#ef6c00")))
+            # 同一セル内の複数ユニットを区別するため、各ユニットのシーン列のリストを保持
+            item.setData(Qt.UserRole, merged_chains)
+            # 複数行が入る可能性があるので行高さを内容に応じて広げる
+            self._sched_table.setItem(h, 0, item)
+            need_h = (len(text.split("\n"))) * 18 + 8
+            if need_h > self._sched_table.rowHeight(h):
+                self._sched_table.setRowHeight(h, need_h)
+
+        # 今日を表示中なら現在時刻の行が見える位置までスクロール
+        if self._displayed_weekday == datetime.now().weekday():
+            cur_row = datetime.now().hour
+            item = self._sched_table.item(cur_row, 0)
+            if item is None:
+                # 空セルでもスクロール位置の指定にだけ使う
+                placeholder = QTableWidgetItem("")
+                self._sched_table.setItem(cur_row, 0, placeholder)
+                item = placeholder
+            self._sched_table.scrollToItem(
+                item, QAbstractItemView.PositionAtCenter,
+            )
+
+    def _on_sched_table_context_menu(self, pos) -> None:
+        """日次テーブルの右クリック → セルのエントリを単発実行。"""
+        item = self._sched_table.itemAt(pos)
+        if item is None:
+            return
+        chains = item.data(Qt.UserRole)
+        if not chains:
+            return
+        menu = QMenu(self._sched_table)
+        # chains は [[scene1, seq1, seq2], [scene3], ...] の構造
+        for idx, chain in enumerate(chains):
+            if not chain:
+                continue
+            head = os.path.splitext(os.path.basename(chain[0]))[0]
+            if len(chain) > 1:
+                label = f"▶ {head} → 続けて {len(chain)-1} 件 を実行"
+            else:
+                label = f"▶ {head} を実行"
+            act = menu.addAction(label)
+            act.triggered.connect(
+                lambda _checked=False, c=chain: self._run_scene_chain_manual(c)
+            )
+        if menu.actions():
+            menu.exec(self._sched_table.viewport().mapToGlobal(pos))
+
+    def _on_sched_table_double_clicked(self, row: int, col: int) -> None:
+        """セルをダブルクリック → 該当エントリの編集ダイアログを開く。
+
+        row は時刻の「時 (HH)」部分を示す。表示中曜日 (self._displayed_weekday)
+        とエントリの repeat / days / date を見て、該当する非 seq エントリを集める。
+        編集ダイアログ (`_EntryDialog`) は QTimeEdit で時刻を 1 分単位で指定できる。
+        """
+        flow = self._runner._flow
+        if flow is None:
+            return
+        cur_name = self._combo_flow.currentData()
+        if not cur_name:
+            return
+        path = os.path.join(FLOWS_DIR, cur_name)
+        if not os.path.exists(path):
+            return
+
+        today_wd = self._displayed_weekday
+        candidates: list[ScheduleEntry] = []
+        for entry in flow.schedule:
+            if entry.seq:
+                continue
+            try:
+                h = int(entry.time.split(":")[0])
+            except (ValueError, AttributeError):
+                continue
+            if h != row:
+                continue
+            if entry.repeat == "weekly":
+                if entry.days and today_wd not in entry.days:
+                    continue
+            elif entry.repeat == "once":
+                try:
+                    d = datetime.strptime(entry.date, "%Y-%m-%d").date()
+                    if d.weekday() != today_wd:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+            # daily は曜日制限なし
+            candidates.append(entry)
+
+        if not candidates:
+            return
+
+        # 同一時刻枠に複数エントリがあれば選択メニュー、単一なら直接編集
+        target: ScheduleEntry | None = None
+        if len(candidates) > 1:
+            menu = QMenu(self._sched_table)
+            mapping: dict[int, ScheduleEntry] = {}
+            for ent in candidates:
+                scenes = entry_scenes(ent)
+                name = (
+                    os.path.splitext(scenes[0])[0]
+                    if scenes else (ent.target or "(未設定)")
+                )
+                act = menu.addAction(f"{ent.time} {name} を編集")
+                mapping[id(act)] = ent
+            chosen = menu.exec(QCursor.pos())
+            if chosen is None:
+                return
+            target = mapping.get(id(chosen))
+        else:
+            target = candidates[0]
+
+        if target is None:
+            return
+        self._edit_schedule_entry_inline(flow, path, target)
+
+    def _edit_schedule_entry_inline(
+        self, flow, flow_path: str, entry: ScheduleEntry,
+    ) -> None:
+        """実行タブから ScheduleEntry を編集 → 保存 → ランナーへ即時反映する。"""
+        scenes_list = self._available_flow_scenes()
+        dlg = _EntryDialog(entry, scenes_list, self)
+        if not dlg.exec():
+            return
+        try:
+            save_pc_flow(flow, flow_path)
+        except Exception as e:
+            QMessageBox.warning(self, "保存失敗", str(e))
+            return
+        # ランナーに最新フローを差し替え（実行中なら次のチェックから新定義で動く）
+        try:
+            new_flow = self._runner.load_flow(flow_path)
+            self._update_schedule_list(new_flow.schedule)
+        except Exception as e:
+            self._append_log(f"フロー再ロード失敗: {e}")
+            return
+        scenes = entry_scenes(entry)
+        sname = (
+            os.path.splitext(scenes[0])[0]
+            if scenes else (entry.target or "(未設定)")
+        )
+        self._append_log(f"✓ スケジュール更新: {entry.time} {sname}")
+
+    def _available_flow_scenes(self) -> list[str]:
+        """フロー編集ダイアログ用のシーン候補（flow_target=True のみ）。"""
+        if not os.path.isdir(SCENES_DIR):
+            return []
+        out: list[str] = []
+        for fname in sorted(os.listdir(SCENES_DIR)):
+            if not fname.endswith(".json") or fname.startswith("_"):
+                continue
+            full = os.path.join(SCENES_DIR, fname)
+            try:
+                scene = load_pc_scene(full)
+                if not scene.flow_target:
+                    continue
+            except Exception:
+                # 読めなくても候補に出す（隠して存在を忘れるよりマシ）
+                pass
+            out.append(fname)
+        return out
+
+    def _run_scene_chain_manual(self, scenes: list[str]) -> None:
+        """実行タブのセルから選ばれたシーン列を単発実行する。"""
+        if not scenes:
+            return
+        if self._runner.is_busy:
+            QMessageBox.information(
+                self, "実行中",
+                "スケジュール実行または単発実行が進行中です。先に停止してください。",
+            )
+            return
+        if self._mouse is None:
+            ans = QMessageBox.question(
+                self, "Pico 未接続",
+                "Pico マウス未接続です。tap/swipe 系のステップはスキップされます。\n"
+                "続行しますか？",
+            )
+            if ans != QMessageBox.Yes:
+                return
+        self._runner.set_window_title(self._settings.get("window_title", ""))
+        self._runner.set_mouse(self._mouse)
+        if not self._runner.run_scenes_async(scenes):
+            self._append_log("⚠ 単発実行を受け付けられませんでした")
 
     # ---------------------------------------------------------------- ウィンドウ選択
     def _pick_window(self) -> None:
@@ -1246,7 +2081,8 @@ class PcFlowWindow(QWidget):
 
     # ---------------------------------------------------------------- フロー開始/停止
     def _toggle_flow(self) -> None:
-        if self._runner.is_running:
+        if self._runner.is_busy:
+            # スケジュール実行・単発実行のいずれもこれで止まる
             self._runner.stop()
         else:
             if self._runner._flow is None:
@@ -1256,14 +2092,41 @@ class PcFlowWindow(QWidget):
 
     def _on_state_changed(self, state: str) -> None:
         if state == "idle":
-            self._btn_flow.setText("開始")
-            self._btn_flow.setStyleSheet("")
+            self._btn_flow.setText("▶ 開始")
+            self._btn_flow.setStyleSheet(
+                "QPushButton{background:#2e7d32;color:white;font-weight:bold;}"
+            )
             self._lbl_run_status.setText("待機中")
+            self._flow_overlay.hide()
         elif state == "running":
-            self._btn_flow.setText("停止")
+            self._btn_flow.setText("■ 停止")
             self._btn_flow.setStyleSheet(
                 "QPushButton{background:#c62828;color:white;font-weight:bold;}"
             )
+            # 設定で有効になっていれば自動表示
+            if self._settings.get("flow_overlay_enabled", True):
+                self._flow_overlay.show()
+
+    # ---- オーバーレイのイベント
+    def _on_overlay_stop_flow(self) -> None:
+        """オーバーレイの「⏸ 停止」 → フロー停止要求。"""
+        if self._runner.is_running or self._runner.is_busy:
+            self._runner.stop()
+            self._append_log("オーバーレイからフロー停止要求")
+
+    def _on_overlay_hide(self) -> None:
+        """オーバーレイの「✕」 → 表示だけ消す（フローは止めない）。
+        以後の自動表示も止めるよう設定もオフにする。
+        """
+        self._flow_overlay.hide()
+        self._settings["flow_overlay_enabled"] = False
+        save_settings(self._settings)
+        self._append_log("オーバーレイを非表示にしました（設定で再表示可能）")
+
+    def _on_overlay_moved(self, x: int, y: int) -> None:
+        """ドラッグ終了位置を settings に保存。"""
+        self._settings["flow_overlay_pos"] = [int(x), int(y)]
+        save_settings(self._settings)
 
     def _on_scene_started(self, name: str, step: int, total: int) -> None:
         self._lbl_run_status.setText(f"実行中: {name}  ステップ {step}/{total}")
@@ -1271,6 +2134,22 @@ class PcFlowWindow(QWidget):
     def _on_step_updated(self, step: int, total: int) -> None:
         scene = self._runner.current_scene
         self._lbl_run_status.setText(f"実行中: {scene}  ステップ {step}/{total}")
+
+    def _on_foreground_confirm_request(self, scene_name: str, done) -> None:
+        """ランナーからの前面確認要求 → ダイアログを表示して結果をランナーへ返す。
+
+        done は threading.Event。ダイアログ閉じ後に set() で待機解放する。
+        """
+        try:
+            dlg = ForegroundConfirmDialog(scene_name, parent=self)
+            dlg.exec()
+            self._runner.set_foreground_choice(dlg.choice)
+        finally:
+            # 例外が発生してもランナー側を永遠に待たせない
+            try:
+                done.set()
+            except Exception:
+                pass
 
     # ---------------------------------------------------------------- テストタブ
     def _get_test_xy(self) -> tuple[int, int] | None:
@@ -1305,11 +2184,19 @@ class PcFlowWindow(QWidget):
             "クリック取得: 左クリックで位置を記録（右クリック・ESC で終了）"
         )
         self._capture_count = 0
-        ov = _ClickCaptureOverlay()
-        ov.clicked.connect(self._on_capture_clicked)
-        ov.finished.connect(self._on_capture_finished)
-        self._capture_overlay = ov
-        ov.show()
+        try:
+            ov = _ClickCaptureOverlay()
+            ov.clicked.connect(self._on_capture_clicked)
+            ov.finished.connect(self._on_capture_finished)
+            self._capture_overlay = ov
+            ov.show()
+            ov.raise_()
+            ov.activateWindow()
+        except Exception as e:
+            import traceback
+            self._test_log_append(f"⚠ オーバーレイ起動失敗: {e}")
+            traceback.print_exc()
+            self._capture_overlay = None
 
     def _on_capture_clicked(self, x: int, y: int) -> None:
         self._capture_count += 1
@@ -1534,13 +2421,10 @@ class PcFlowWindow(QWidget):
 
     # ---------------- 3 点連続クリック検証（HID 直接 / 画面外パーク経由）
     def _collect_seq_points(self) -> list[tuple[str, int, int]] | None:
-        """テストタブの 目標 / ドラッグ開始 / ドラッグ終了 3 点を回収。"""
+        """連続クリック検証セクション専用の 3 点入力欄から座標を回収。"""
         points: list[tuple[str, int, int]] = []
-        for label, xinp, yinp in (
-            ("目標",   self._inp_test_x, self._inp_test_y),
-            ("開始",   self._inp_drag_sx, self._inp_drag_sy),
-            ("終了",   self._inp_drag_ex, self._inp_drag_ey),
-        ):
+        for i, (xinp, yinp) in enumerate(self._seq_inputs, start=1):
+            label = f"{i}点目"
             try:
                 x = int(xinp.text())
                 y = int(yinp.text())
@@ -1549,6 +2433,49 @@ class PcFlowWindow(QWidget):
                 return None
             points.append((label, x, y))
         return points
+
+    def _start_capture_seq(self, idx: int) -> None:
+        """連続クリック検証の `idx` 点目（1〜3）の座標を、次の 1 クリックで取得する。"""
+        if not (1 <= idx <= len(self._seq_inputs)):
+            return
+        if self._capture_overlay is not None:
+            # 連打されたら現行キャプチャを終了
+            self._capture_overlay.close()
+            return
+        self._test_log_append(
+            f"連続クリック {idx} 点目: 左クリックで取得（右クリック・ESC で中断）"
+        )
+        try:
+            ov = _ClickCaptureOverlay()
+            ov.clicked.connect(lambda x, y, i=idx: self._on_capture_seq_clicked(i, x, y))
+            ov.finished.connect(self._on_capture_finished)
+            self._capture_overlay = ov
+            self._capture_count = 0
+            ov.show()
+            ov.raise_()
+            ov.activateWindow()
+        except Exception as e:
+            import traceback
+            self._test_log_append(f"⚠ オーバーレイ起動失敗: {e}")
+            traceback.print_exc()
+            self._capture_overlay = None
+
+    def _on_capture_seq_clicked(self, idx: int, x: int, y: int) -> None:
+        if not (1 <= idx <= len(self._seq_inputs)):
+            return
+        xinp, yinp = self._seq_inputs[idx - 1]
+        xinp.setText(str(x))
+        yinp.setText(str(y))
+        self._capture_count += 1   # _on_capture_finished の「中断（取得なし）」誤判定を避ける
+        self._test_log_append(f"連続クリック {idx} 点目を取得: ({x}, {y})")
+        # 1 点取得したらオーバーレイを閉じる。
+        # close() は finished シグナルを発しないので、明示的に finished を emit して
+        # _on_capture_finished で self._capture_overlay = None になるようにする
+        # （これをしないと次の「取得」ボタン押下時に「既に取得中」扱いになる）。
+        ov = self._capture_overlay
+        if ov is not None:
+            ov.finished.emit()
+            ov.close()
 
     def _test_seq_hid(self) -> None:
         """A: 毎回 click_at（HID 移動 → CLICK）で 3 点連続クリック。"""
@@ -1656,6 +2583,9 @@ class PcFlowWindow(QWidget):
     def _refresh_status(self) -> None:
         title = self._settings.get("window_title", "")
         self._update_win_label(title)
+        # 本日フロー表の赤線を 1 秒ごとに動かす（実行タブが見えていなくても安価）
+        if hasattr(self, "_sched_table"):
+            self._sched_table.viewport().update()
         # 日付跨ぎ検出: 表示中の曜日が "今日" のまま固定だった場合に追従させる
         new_today_wd = datetime.now().weekday()
         if getattr(self, "_last_today_wd", None) != new_today_wd:
@@ -1666,6 +2596,8 @@ class PcFlowWindow(QWidget):
                 self._displayed_weekday = new_today_wd
             self._update_day_label()
             self._refresh_day_list()
+            # 深夜 0 時を跨いだのでウォッチャー発火カウントもリセット表示に反映
+            self._reload_watchers_list()
 
     # ---------------------------------------------------------------- ログ
     def _append_log(self, msg: str) -> None:
@@ -1678,6 +2610,9 @@ class PcFlowWindow(QWidget):
         self._runner.stop()
         if hasattr(self, "_recorder"):
             self._recorder.stop()
+        # 翻訳ループも停止
+        if hasattr(self, "_tr_stop"):
+            self._tr_stop.set()
         # 開いている編集ウィンドウを全て閉じる。
         # close() が closed シグナル経由でメインの保持リストから自己除去するため、
         # リスト変動を避けて list() でスナップショットしてから回す。
@@ -1701,12 +2636,12 @@ class PcFlowWindow(QWidget):
 
 
 class _SettingsDialog(QDialog):
-    """設定ダイアログ。現状は Google Chat 通知のみ。"""
+    """設定ダイアログ。Google Chat 通知 + 翻訳タブの API キー / ベース言語。"""
 
     def __init__(self, settings: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("設定")
-        self.resize(520, 220)
+        self.resize(560, 340)
         self._initial = dict(settings)
 
         lay = QVBoxLayout(self)
@@ -1737,6 +2672,81 @@ class _SettingsDialog(QDialog):
         form.addRow("", self._lbl_test)
 
         lay.addWidget(grp)
+
+        # 前面化確認 (ウォッチャー/スケジュール発火時)
+        fg_grp = QGroupBox("前面化確認ダイアログ")
+        fg_form = QFormLayout(fg_grp)
+        self._spin_fg_interval = QDoubleSpinBox()
+        self._spin_fg_interval.setRange(0.0, 120.0)
+        self._spin_fg_interval.setDecimals(1)
+        self._spin_fg_interval.setSingleStep(1.0)
+        self._spin_fg_interval.setSuffix(" 分")
+        self._spin_fg_interval.setValue(
+            float(settings.get("foreground_check_interval_min", 5.0))
+        )
+        self._spin_fg_interval.setToolTip(
+            "対象ウィンドウが前面でない時に出す確認ダイアログの再表示間隔。\n"
+            "この時間内に出した選択（即時実施 / スキップ）はキャッシュされ、\n"
+            "ウォッチャーが秒単位で発火しても毎回ダイアログが出ません。\n"
+            "0 = 毎回確認（キャッシュ無効）。"
+        )
+        fg_form.addRow("再表示間隔:", self._spin_fg_interval)
+        fg_hint = QLabel(
+            "ウォッチャーが連続発火しても、この間隔内は直近の選択を自動適用します。\n"
+            "「待機」は対象外（毎回 3 分後に再評価）。"
+        )
+        fg_hint.setStyleSheet("color:#666; font-size:11px;")
+        fg_hint.setWordWrap(True)
+        fg_form.addRow("", fg_hint)
+        lay.addWidget(fg_grp)
+
+        # 実行中オーバーレイ
+        ov_grp = QGroupBox("フロー実行中オーバーレイ")
+        ov_form = QFormLayout(ov_grp)
+        self._chk_overlay = QCheckBox("フロー開始時に半透明オーバーレイを自動表示")
+        self._chk_overlay.setChecked(
+            bool(settings.get("flow_overlay_enabled", True))
+        )
+        self._chk_overlay.setToolTip(
+            "実行中シーン名 / ステップ進捗 / 次回スケジュール / 直近の発火 を\n"
+            "ゲームウィンドウの上に常時前面で重ねて表示します。\n"
+            "オーバーレイは左ドラッグで移動可、位置は自動保存されます。"
+        )
+        ov_form.addRow("", self._chk_overlay)
+        lay.addWidget(ov_grp)
+
+        # 翻訳タブ
+        from .translation import LANG_CODES, LANG_LABELS_JA
+        tr_grp = QGroupBox("翻訳タブ (Claude API)")
+        tr_form = QFormLayout(tr_grp)
+        self._inp_tr_key = QLineEdit(settings.get("translation_api_key", "") or "")
+        self._inp_tr_key.setEchoMode(QLineEdit.Password)
+        self._inp_tr_key.setPlaceholderText("sk-ant-api03-...")
+        self._inp_tr_key.setToolTip(
+            "Anthropic Console (console.anthropic.com) で発行した API キーを貼り付け。\n"
+            "空欄なら翻訳タブは無効。"
+        )
+        tr_form.addRow("Claude API キー:", self._inp_tr_key)
+
+        self._cmb_tr_base = QComboBox()
+        base_cur = (settings.get("translation_base_lang") or "ja").lower()
+        for code in LANG_CODES:
+            self._cmb_tr_base.addItem(f"{LANG_LABELS_JA[code]} ({code})", code)
+            if code == base_cur:
+                self._cmb_tr_base.setCurrentIndex(self._cmb_tr_base.count() - 1)
+        self._cmb_tr_base.setToolTip(
+            "チャット領域のメッセージはこのベース言語に統一して翻訳されます。\n"
+            "ベース言語と同じメッセージは原文のまま表示。"
+        )
+        tr_form.addRow("ベース言語:", self._cmb_tr_base)
+
+        hint_tr = QLabel(
+            "領域・間隔・ユーザー入力の対象言語は翻訳タブ内で個別に変更します。"
+        )
+        hint_tr.setStyleSheet("color:#666; font-size:11px;")
+        hint_tr.setWordWrap(True)
+        tr_form.addRow("", hint_tr)
+        lay.addWidget(tr_grp)
 
         # OK / Cancel
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1770,7 +2780,57 @@ class _SettingsDialog(QDialog):
         """OK 時に呼ばれて、変更されたキーを含む dict を返す。"""
         return {
             "google_chat_webhook": self._inp_webhook.text().strip(),
+            "foreground_check_interval_min": float(self._spin_fg_interval.value()),
+            "flow_overlay_enabled": bool(self._chk_overlay.isChecked()),
+            "translation_api_key": self._inp_tr_key.text().strip(),
+            "translation_base_lang": self._cmb_tr_base.currentData() or "ja",
         }
+
+
+class _RunDayTable(QTableWidget):
+    """実行タブ用: 24時間 × 1列の本日フロー表。現在時刻に赤線を引く。
+
+    pc_flow_editor の _ScheduleTable と同じ要領の赤線描画を、1時間刻みに合わせて行う。
+    """
+
+    HOURS = 24
+    ROW_H = 26
+
+    def __init__(self) -> None:
+        super().__init__(self.HOURS, 1)
+        # 縦ヘッダー: HH:00、横ヘッダー: 「本日のフロー」
+        self.setVerticalHeaderLabels([f"{h:02d}:00" for h in range(self.HOURS)])
+        self.setHorizontalHeaderLabels(["本日のフロー"])
+        self.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.setSelectionMode(QTableWidget.NoSelection)
+        self.setShowGrid(True)
+        hdr = self.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Stretch)
+        for r in range(self.HOURS):
+            self.setRowHeight(r, self.ROW_H)
+        self.setStyleSheet("font-size:12px;")
+
+    def paintEvent(self, e) -> None:  # noqa: N802
+        super().paintEvent(e)
+        # 1 行 = 1 時間。現在時刻 → 行内の比率（分・秒で滑らかに）
+        now = datetime.now()
+        row_f = now.hour + now.minute / 60.0 + now.second / 3600.0
+        if row_f < 0 or row_f >= self.rowCount():
+            return
+        row = int(row_f)
+        frac = row_f - row
+        y_top = self.rowViewportPosition(row)
+        if y_top < 0:
+            return
+        y = y_top + int(frac * self.rowHeight(row))
+        x_start = self.columnViewportPosition(0)
+        last = self.columnCount() - 1
+        x_end = self.columnViewportPosition(last) + self.columnWidth(last)
+        p = QPainter(self.viewport())
+        pen = QPen(QColor("#e53935"))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.drawLine(x_start, y, x_end, y)
 
 
 class _ClickCaptureOverlay(QWidget):
@@ -1785,18 +2845,25 @@ class _ClickCaptureOverlay(QWidget):
 
     def __init__(self) -> None:
         super().__init__(None)
+        # Qt.Tool を外し標準的なフローティングウィンドウとして扱う。
+        # 一部の Windows 環境では Tool フラグ付きフレームレス透明ウィンドウが
+        # 表示されない（タスクバーにも出ず最前面化されない）事があるため。
         self.setWindowFlags(
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnTopHint
-            | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setCursor(Qt.CrossCursor)
         self.setFocusPolicy(Qt.StrongFocus)
 
         # 仮想スクリーン全体を覆う
-        vg = QApplication.primaryScreen().virtualGeometry()
-        self.setGeometry(vg)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            vg = screen.virtualGeometry()
+            self.setGeometry(vg)
+        else:
+            # フォールバック: プライマリ画面が取れないケース
+            self.setGeometry(0, 0, 1920, 1080)
 
         self._count = 0
 
@@ -1806,8 +2873,9 @@ class _ClickCaptureOverlay(QWidget):
         self._lbl = QLabel()
         self._lbl.setAlignment(Qt.AlignCenter)
         self._lbl.setStyleSheet(
-            "background:rgba(0,0,0,180); color:white; padding:10px 20px;"
-            "font-size:13px; border-radius:6px;"
+            "background:rgba(0,0,0,200); color:white; padding:12px 24px;"
+            "font-size:14px; font-weight:bold; border-radius:8px;"
+            "border: 2px solid #ffeb3b;"
         )
         self._update_label()
         lay.addWidget(self._lbl, 0, Qt.AlignHCenter)
@@ -1815,13 +2883,13 @@ class _ClickCaptureOverlay(QWidget):
 
     def _update_label(self) -> None:
         self._lbl.setText(
-            f"左クリック=取得 ({self._count}件)  /  右クリック・ESC=終了"
+            f"🎯 左クリック=取得 ({self._count}件)  /  右クリック・ESC=終了"
         )
 
     def paintEvent(self, e) -> None:  # noqa: N802
-        # 薄く塗ってオーバーレイの存在を分かりやすく
+        # 薄く塗ってオーバーレイの存在を分かりやすく（以前より濃いめ）
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 0, 0, 40))
+        p.fillRect(self.rect(), QColor(0, 0, 0, 80))
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
         if e.button() == Qt.LeftButton:
@@ -1840,6 +2908,7 @@ class _ClickCaptureOverlay(QWidget):
 
     def showEvent(self, e) -> None:  # noqa: N802
         super().showEvent(e)
+        self.raise_()
         self.activateWindow()
         self.setFocus()
 

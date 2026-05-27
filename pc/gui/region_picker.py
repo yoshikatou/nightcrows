@@ -229,24 +229,27 @@ class RegionPickerDialog(QDialog):
         window_title: str,
         current_rel: list[float] | None = None,
         parent: QWidget | None = None,
+        dialog_title: str = "経験値%の表示領域を設定",
+        hint_text: str | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("経験値%の表示領域を設定")
+        self.setWindowTitle(dialog_title)
         self.setMinimumSize(900, 600)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
         self._window_title = window_title
         self._rel: list[float] = list(current_rel) if current_rel else []
         self._img_size: tuple[int, int] = (0, 0)
+        self._hint_text = hint_text or (
+            "ゲームウィンドウのスクショを取得して、経験値%が表示されている領域をドラッグで囲んでください。\n"
+            "ホイールでズーム / 右ドラッグでパン / 領域はウィンドウサイズに対する比率で保存されます。"
+        )
         self._build_ui()
         if self._window_title:
             self._capture()
 
     def _build_ui(self) -> None:
         lay = QVBoxLayout(self)
-        hint = QLabel(
-            "ゲームウィンドウのスクショを取得して、経験値%が表示されている領域をドラッグで囲んでください。\n"
-            "ホイールでズーム / 右ドラッグでパン / 領域はウィンドウサイズに対する比率で保存されます。"
-        )
+        hint = QLabel(self._hint_text)
         hint.setStyleSheet("color:#555; font-size:11px;")
         lay.addWidget(hint)
 

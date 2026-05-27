@@ -1,0 +1,79 @@
+{
+  "name": "死亡→復旧",
+  "window_title": "NIGHT CROWS(1)",
+  "flow_target": true,
+  "steps": [
+    {
+      "type": "wait_fixed",
+      "seconds": 90.0
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260525_003047_781908.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.7828,
+      "ry": 0.0264,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260525_003055_980599.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.147,
+      "ry": 0.1398,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "tap",
+      "rx": 0.1451,
+      "ry": 0.8815,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "tap",
+      "rx": 0.025,
+      "ry": 0.1728,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "tap",
+      "rx": 0.1599,
+      "ry": 0.8791,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260525_003158_721917.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    }
+  ]
+}

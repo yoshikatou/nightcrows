@@ -1,0 +1,27 @@
+{
+  "id": "f7105dc3",
+  "title": "死亡",
+  "enabled": true,
+  "priority": 0,
+  "condition": {
+    "type": "image_appear",
+    "template": "watcher_templates/f7105dc3.png",
+    "region": [
+      0.8767,
+      0.9484,
+      0.1063,
+      0.0292
+    ],
+    "threshold": 0.85,
+    "ocr_whitelist": "0123456789",
+    "op": "<=",
+    "value": 0.0,
+    "consecutive": 1
+  },
+  "handler": "復活.json",
+  "after": "restart_scene",
+  "cooldown_s": 60.0,
+  "alert_desktop": false,
+  "poll_min_s": 1.0,
+  "poll_max_s": 4.0
+}

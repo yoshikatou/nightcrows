@@ -32,6 +32,14 @@ _PICO_VIDS = {0x239A, 0x2E8A}
 _BAUD = 115200
 _TIMEOUT = 2.0
 
+# 短距離移動の精度優先パラメータ。
+# 目標までの距離がこの px 以下なら click_at が精度優先パラメータに切り替える。
+# 短距離ではポインター加速・HID 端数の影響が大きく出るため、
+# ステップを細かく・間隔を広く取って 1 ステップあたりの加速影響を抑える。
+_SHORT_MOVE_THRESHOLD_PX = 80
+_SHORT_MOVE_STEP = 5         # max_step (px/event)
+_SHORT_MOVE_DELAY = 0.04     # event 間 sleep (秒)
+
 
 def _enable_dpi_awareness() -> None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -132,8 +140,18 @@ class PicoMouse:
 
         Nightcrows 等のチート対策で SetCursorPos がブロックされる状況でも、
         実マウス相当の HID 相対移動なら通る。戻り値は最終カーソル位置。
+
+        短距離移動はポインター加速の影響と HID 端数の影響を受けやすいため、
+        ステップを細かく・間隔を広く取って精度優先のパラメータに自動切替する。
         """
-        fx, fy = self.move_to_accurate(x, y)
+        cx, cy = self.get_cursor_pos()
+        dist = max(abs(x - cx), abs(y - cy))
+        if dist <= _SHORT_MOVE_THRESHOLD_PX:
+            fx, fy = self.move_to_accurate(
+                x, y, step=_SHORT_MOVE_STEP, delay=_SHORT_MOVE_DELAY,
+            )
+        else:
+            fx, fy = self.move_to_accurate(x, y)
         resp = self._cmd(f"CLICK {button.upper()} {hold_ms}")
         if resp != "OK":
             raise RuntimeError(f"Pico CLICK エラー: {resp}")
@@ -205,8 +223,16 @@ class PicoMouse:
             # ポインター速度スケールで HID 単位に変換
             hx = int(px / self._speed_scale)
             hy = int(py / self._speed_scale)
+            # 残距離があるのに HID 単位で 0 に丸まると永久に収束しないため
+            # 最小 1 単位（= speed_scale 画素相当）に丸める。
+            # これがないと speed_scale > 1.0 の環境で move_to_accurate の
+            # 補正ループが残差を埋められずタイムアウトする。
+            if hx == 0 and px != 0:
+                hx = 1 if px > 0 else -1
+            if hy == 0 and py != 0:
+                hy = 1 if py > 0 else -1
             if hx == 0 and hy == 0:
-                break  # 端数が小さすぎて HID に変換できない → 補正に任せる
+                break
             self.move(hx, hy)
             dx -= px
             dy -= py

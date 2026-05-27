@@ -1,0 +1,27 @@
+{
+  "id": "f6f4a018",
+  "title": "ポーション個数低下",
+  "enabled": true,
+  "priority": 100,
+  "condition": {
+    "type": "ocr_number",
+    "template": "watcher_templates/f6f4a018.png",
+    "region": [
+      0.292,
+      0.9591,
+      0.0313,
+      0.0189
+    ],
+    "threshold": 0.85,
+    "ocr_whitelist": "0123456789",
+    "op": "<=",
+    "value": 400.0,
+    "consecutive": 5
+  },
+  "handler": "ポーション補給.json",
+  "after": "restart_scene",
+  "cooldown_s": 60.0,
+  "alert_desktop": false,
+  "poll_min_s": 15.0,
+  "poll_max_s": 30.0
+}

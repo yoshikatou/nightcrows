@@ -1,10 +1,11 @@
 """PC シーン編集ウィンドウ（独立して開く広めの画面）。
 
 ワークフロー:
-    1. ウィンドウから「スクショ取得」→ snapshots/ に PNG を保存し snapshot ステップを追加
+    1. ウィンドウから「スクショ取得」→ snapshots/ に PNG を保存し
+       snapshot ステップ（撮影マーカー）を追加。再生では no-op。
     2. キャンバスをクリック → その位置を tap ステップとして追加
     3. キャンバス上をドラッグ → 領域を選択し、メニューから次を選ぶ:
-       - wait_image: 領域を切り出して templates/ に保存し snapshot ステップ追加
+       - wait_image: 領域を切り出して templates/ に保存し wait_image ステップ追加
        - tap_image:  領域を切り出して templates/ に保存し tap_image ステップ追加
        - swipe:      ドラッグの左上 → 右下を swipe ステップとして追加
     4. wait_fixed ボタンで待機秒数を追加
@@ -174,7 +175,10 @@ class SceneEditorWindow(QWidget):
 
         rlay.addWidget(QLabel("操作:"))
         btn_capture = QPushButton("スクショ取得")
-        btn_capture.setToolTip("対象ウィンドウからスクショを撮って snapshot ステップを追加")
+        btn_capture.setToolTip(
+            "対象ウィンドウからスクショを撮ってキャンバスに表示。"
+            "シーンには撮影マーカー (snapshot) として記録され、再生時は何もしない"
+        )
         btn_capture.clicked.connect(self._capture_snapshot)
         rlay.addWidget(btn_capture)
         btn_wait = QPushButton("待機 追加")
@@ -302,9 +306,12 @@ class SceneEditorWindow(QWidget):
         os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
         path = os.path.join(SNAPSHOTS_DIR, f"snap_{ts}.png").replace("\\", "/")
         cv2.imwrite(path, img)
+        # snapshot ステップは「撮影マーカー」専用 (再生時は no-op)。
+        # キャンバス切替マーカーとして JSON に残すが、画像マッチではないので
+        # threshold / timeout_s は付けない。
         self._scene.steps.append(PcStep(
             type="snapshot",
-            params={"path": path, "threshold": 0.85, "timeout_s": 10.0},
+            params={"path": path},
         ))
         self._current_snapshot_path = path
         self._canvas.set_snapshot(path)
@@ -396,8 +403,13 @@ class SceneEditorWindow(QWidget):
 
         if action is act_wait:
             self._scene.steps.append(PcStep(
-                type="snapshot",
-                params={"path": tpl_path, "threshold": 0.85, "timeout_s": 10.0},
+                type="wait_image",
+                params={
+                    "template": tpl_path,
+                    "threshold": 0.85,
+                    "timeout_s": 10.0,
+                    "region": [round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4)],
+                },
             ))
         else:  # tap_image
             self._scene.steps.append(PcStep(
@@ -416,7 +428,7 @@ class SceneEditorWindow(QWidget):
     # --------------------------------------------------- 位置再選択モード
     # 対応タイプと、クリック / ドラッグのどちらを受けるか
     _EDIT_POS_CLICK_TYPES  = {"tap"}
-    _EDIT_POS_REGION_TYPES = {"tap_image", "snapshot", "swipe", "scroll", "if_image"}
+    _EDIT_POS_REGION_TYPES = {"tap_image", "wait_image", "swipe", "scroll", "if_image"}
 
     def _enter_edit_pos_mode(self) -> None:
         row = self._list_steps.currentRow()
@@ -432,14 +444,6 @@ class SceneEditorWindow(QWidget):
                 f"⚠ {step.type} は位置を持たないため位置編集できません"
             )
             return
-        # snapshot のうち、フル画面キャプチャ（snapshots/ 配下）は対象外
-        if step.type == "snapshot":
-            path = str(step.params.get("path", ""))
-            if not path.startswith(TEMPLATES_DIR):
-                self._append_run_log(
-                    "⚠ この snapshot はフル画面キャプチャ。位置編集はテンプレ画像のみ対応"
-                )
-                return
         if self._current_snapshot_path is None:
             QMessageBox.warning(
                 self, "エラー",
@@ -464,12 +468,12 @@ class SceneEditorWindow(QWidget):
             return
         step = self._scene.steps[self._edit_pos_row]
         hints = {
-            "tap":       "クリックで位置を更新",
-            "tap_image": "ドラッグで領域を更新（テンプレ画像を再切出し）",
-            "snapshot":  "ドラッグで領域を更新（テンプレ画像を再切出し）",
-            "swipe":     "ドラッグで開始 → 終了を更新",
-            "scroll":    "ドラッグで開始 → 終了を更新",
-            "if_image":  "ドラッグで領域を更新（テンプレ画像を再切出し）",
+            "tap":        "クリックで位置を更新",
+            "tap_image":  "ドラッグで領域を更新（テンプレ画像を再切出し）",
+            "wait_image": "ドラッグで領域を更新（テンプレ画像を再切出し）",
+            "swipe":      "ドラッグで開始 → 終了を更新",
+            "scroll":     "ドラッグで開始 → 終了を更新",
+            "if_image":   "ドラッグで領域を更新（テンプレ画像を再切出し）",
         }
         self._edit_banner.setText(
             f"📍 #{self._edit_pos_row + 1} {step.type} の位置を再選択中…  "
@@ -513,7 +517,7 @@ class SceneEditorWindow(QWidget):
             self._append_run_log(f"✓ #{row + 1} {step.type} 始終点を更新")
             self._finish_edit_pos(row)
             return
-        # tap_image / snapshot / if_image: テンプレを切り出し直す
+        # tap_image / wait_image / if_image: テンプレを切り出し直す
         if self._current_snapshot_path is None:
             QMessageBox.warning(self, "エラー", "スナップ画像がありません")
             return
@@ -535,10 +539,8 @@ class SceneEditorWindow(QWidget):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         tpl_path = os.path.join(scene_dir, f"tpl_{ts}.png").replace("\\", "/")
         cv2.imwrite(tpl_path, crop)
-        if step.type == "snapshot":
-            step.params["path"] = tpl_path
-        else:  # tap_image / if_image
-            step.params["template"] = tpl_path
+        # tap_image / wait_image / if_image はすべて "template" フィールドに統一
+        step.params["template"] = tpl_path
         step.params["region"] = [
             round(rx, 4), round(ry, 4), round(rw, 4), round(rh, 4),
         ]
@@ -918,9 +920,14 @@ class SceneEditorWindow(QWidget):
             return f"{i+1:02d}. ⏳ 待機  {p.get('seconds', 0)} 秒"
         if s.type == "snapshot":
             name = os.path.basename(str(p.get("path", "")))
+            return f"{i+1:02d}. 📷 スクショ撮影  {name}  (再生時スキップ)"
+        if s.type == "wait_image":
+            tpl = str(p.get("template", p.get("path", "")))
+            name = os.path.basename(tpl)
             return (
-                f"{i+1:02d}. 📸 画像出現待ち  {name}  "
-                f"閾値={p.get('threshold', 0.85)}"
+                f"{i+1:02d}. ⏳ 画像出現待ち  {name}  "
+                f"閾値={p.get('threshold', 0.85)} "
+                f"timeout={p.get('timeout_s', 10.0)}s"
             )
         if s.type == "tap":
             return (

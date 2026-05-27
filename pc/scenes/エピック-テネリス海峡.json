@@ -1,0 +1,177 @@
+{
+  "name": "エピック-テネリス海峡",
+  "window_title": "NIGHT CROWS(1)",
+  "flow_target": true,
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_225830_844847.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.9769,
+      "ry": 0.0252,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_225853_806743.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.8937,
+      "ry": 0.1657,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_225913_140935.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.4104,
+      "ry": 0.0783,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_225933_093184.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.1451,
+      "ry": 0.3276,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_225947_455937.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.9298,
+      "ry": 0.9583,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230021_649048.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.5628,
+      "ry": 0.5862,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 20.0
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230134_254106.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.11,
+      "ry": 0.1209,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230154_608424.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.3771,
+      "ry": 0.5378,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 4.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230210_792710.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.3863,
+      "ry": 0.4799,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.5
+    },
+    {
+      "type": "tap",
+      "rx": 0.9741,
+      "ry": 0.0299,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 15.0
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230325_915789.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.9649,
+      "ry": 0.7882,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    }
+  ]
+}

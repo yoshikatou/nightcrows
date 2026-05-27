@@ -1,7 +1,45 @@
 {
   "name": "基本_pc",
   "version": 1,
-  "schedule": [],
+  "schedule": [
+    {
+      "time": "06:10",
+      "target": "DQ.json",
+      "repeat": "daily"
+    },
+    {
+      "time": "08:30",
+      "target": "BF3入口＋94LV.json",
+      "repeat": "weekly",
+      "days": [
+        1
+      ]
+    },
+    {
+      "time": "22:30",
+      "target": "エピック-テネリス海峡.json",
+      "repeat": "weekly",
+      "days": [
+        1
+      ]
+    },
+    {
+      "time": "00:00",
+      "target": "エピック-テネリス海峡.json",
+      "repeat": "weekly",
+      "days": [
+        2
+      ]
+    },
+    {
+      "time": "07:22",
+      "target": "BF3入口＋94LV.json",
+      "repeat": "weekly",
+      "days": [
+        2
+      ]
+    }
+  ],
   "watchers": [],
   "settings": {
     "polling_interval_s": 1.0

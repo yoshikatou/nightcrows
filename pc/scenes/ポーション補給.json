@@ -1,0 +1,151 @@
+{
+  "name": "ポーション補給",
+  "window_title": "NIGHT CROWS(1)",
+  "flow_target": true,
+  "steps": [
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230642_374747.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.3475,
+      "ry": 0.9536,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 30.0
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230735_104268.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.1017,
+      "ry": 0.0653,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 30.0
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230845_984321.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.2172,
+      "ry": 0.9689,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 2.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230902_848649.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.5601,
+      "ry": 0.7161,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 3.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230920_379129.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.549,
+      "ry": 0.6925,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230932_972176.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.1488,
+      "ry": 0.3441,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_230947_751266.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.5776,
+      "ry": 0.513,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_231003_726851.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.5619,
+      "ry": 0.715,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 4.5
+    },
+    {
+      "type": "snapshot",
+      "path": "snapshots/snap_20260526_231028_090501.png",
+      "threshold": 0.85,
+      "timeout_s": 10.0
+    },
+    {
+      "type": "tap",
+      "rx": 0.975,
+      "ry": 0.0264,
+      "duration_ms": 50
+    },
+    {
+      "type": "wait_fixed",
+      "seconds": 1.5
+    }
+  ]
+}
