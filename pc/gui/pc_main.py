@@ -19,7 +19,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIntValidator, QPainter, QPen
@@ -58,7 +58,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .exp_meter import ExpMeter
+from .exp_meter import CURRENT_WINDOW, ExpMeter
+from .overlay import OverlayWindow as ExpOverlayWindow
 from .logger import DEFAULT_LOG_RETAIN_DAYS, purge_old_logs, write_log
 from .pc_flow import (
     DAY_NAMES,
@@ -104,6 +105,9 @@ class PcFlowWindow(QWidget):
         self._settings = settings
         self._mouse: "PicoMouse | None" = None
         self._runner = PcFlowRunner()
+        # 経験値計測（タブで使う）。設定とサンプル列は exp_meter.json で永続化される
+        self._exp_meter = ExpMeter()
+        self._exp_overlay: "ExpOverlayWindow | None" = None
 
         self.setWindowTitle("PC フロー制御")
         self.setMinimumWidth(360)
@@ -149,6 +153,7 @@ class PcFlowWindow(QWidget):
         self._tabs.addTab(self._build_tab_watcher(),     "見張り")
         self._tabs.addTab(self._build_tab_editor(),      "作成")
         self._tabs.addTab(self._build_tab_record(),      "録画")
+        self._tabs.addTab(self._build_tab_exp_meter(),   "経験値")
         self._tabs.addTab(self._build_tab_translation(), "翻訳")
         self._tabs.addTab(self._build_tab_log(),         "ログ")
         outer.addWidget(self._tabs, 1)
@@ -1023,6 +1028,9 @@ class PcFlowWindow(QWidget):
         self._spin_rec_fps.setToolTip(
             "推奨 2 fps（一晩でも数百MB級）。動きを細かく追いたい場合は上げる"
         )
+        self._spin_rec_fps.valueChanged.connect(
+            lambda v: self._runner.set_recorder(self._recorder, fps=v)
+        )
         ctrl_row.addWidget(self._spin_rec_fps)
         ctrl_row.addStretch(1)
         self._btn_rec = QPushButton("⏺ 録画開始")
@@ -1066,6 +1074,8 @@ class PcFlowWindow(QWidget):
         self._recorder.file_rotated.connect(self._on_record_rotated)
         self._recorder.stats_updated.connect(self._on_record_stats)
         self._recorder.error_occurred.connect(self._on_record_error)
+        # ウォッチャー発火→ハンドラー完了の自動録画にも同じ recorder を流用
+        self._runner.set_recorder(self._recorder, fps=float(self._spin_rec_fps.value()))
 
         self._reload_recordings()
         return w
@@ -1143,6 +1153,268 @@ class PcFlowWindow(QWidget):
             os.startfile(abspath)  # noqa: S606 — Windows のみ
         except Exception as e:
             self._append_log(f"⚠ フォルダオープン失敗: {e}")
+
+    # ---- 経験値タブ: 単体 exp_meter アプリの主要機能をフロー UI 側に組込
+    def _build_tab_exp_meter(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 8, 6, 6)
+        lay.setSpacing(8)
+
+        m = self._exp_meter
+        # 対象ウィンドウはメインの window_title と同期させる（毎回 start 時にも再代入）
+        m.window_title = (self._settings.get("window_title") or m.window_title or "")
+
+        # 設定
+        grp_cfg = QGroupBox("設定")
+        cfg_lay = QFormLayout(grp_cfg)
+
+        reg_row = QHBoxLayout()
+        self._lbl_exp_region = QLabel("")
+        self._btn_exp_region = QPushButton("変更…")
+        self._btn_exp_region.clicked.connect(self._exp_pick_region)
+        reg_row.addWidget(self._lbl_exp_region, 1)
+        reg_row.addWidget(self._btn_exp_region)
+        cfg_lay.addRow("計測領域:", reg_row)
+
+        hint_row = QHBoxLayout()
+        self._exp_rb1 = QRadioButton("1桁 (0〜9%台)")
+        self._exp_rb2 = QRadioButton("2桁 (10〜99%台)")
+        (self._exp_rb2 if m.digit_hint == 2 else self._exp_rb1).setChecked(True)
+        self._exp_rb1.toggled.connect(self._exp_on_hint_changed)
+        hint_row.addWidget(self._exp_rb1)
+        hint_row.addWidget(self._exp_rb2)
+        hint_row.addStretch(1)
+        cfg_lay.addRow("桁数ヒント:", hint_row)
+
+        self._exp_spin_interval = QSpinBox()
+        self._exp_spin_interval.setRange(10, 600)
+        self._exp_spin_interval.setSingleStep(5)
+        self._exp_spin_interval.setSuffix(" 秒")
+        self._exp_spin_interval.setValue(m.interval_sec)
+        self._exp_spin_interval.valueChanged.connect(self._exp_on_interval_changed)
+        cfg_lay.addRow("計測間隔:", self._exp_spin_interval)
+
+        lay.addWidget(grp_cfg)
+
+        # 計測状況
+        grp_stat = QGroupBox("📊 計測状況")
+        stat_lay = QVBoxLayout(grp_stat)
+        self._exp_lbl_current = QLabel("現在値:  —")
+        self._exp_lbl_cspd    = QLabel("現在速度:  —")
+        self._exp_lbl_aspd    = QLabel("平均速度:  —")
+        self._exp_lbl_eta     = QLabel("LvUP予測:  —")
+        self._exp_lbl_meta    = QLabel("")
+        self._exp_lbl_meta.setStyleSheet("color:#777; font-size:10px;")
+        for lbl in (
+            self._exp_lbl_current, self._exp_lbl_cspd,
+            self._exp_lbl_aspd, self._exp_lbl_eta, self._exp_lbl_meta,
+        ):
+            stat_lay.addWidget(lbl)
+        lay.addWidget(grp_stat)
+
+        # コントロール
+        ctrl = QHBoxLayout()
+        self._exp_btn_start = QPushButton("▶ 計測開始")
+        self._exp_btn_start.clicked.connect(self._exp_toggle)
+        self._exp_btn_reset = QPushButton("🔄 リセット")
+        self._exp_btn_reset.clicked.connect(self._exp_reset)
+        self._exp_btn_overlay = QPushButton("🗕 ゲーム画面に重ねる")
+        self._exp_btn_overlay.clicked.connect(self._exp_show_overlay)
+        ctrl.addWidget(self._exp_btn_start)
+        ctrl.addWidget(self._exp_btn_reset)
+        ctrl.addWidget(self._exp_btn_overlay)
+        ctrl.addStretch(1)
+        lay.addLayout(ctrl)
+
+        self._exp_lbl_status = QLabel("")
+        self._exp_lbl_status.setStyleSheet("color:#666; font-size:11px;")
+        self._exp_lbl_status.setWordWrap(True)
+        lay.addWidget(self._exp_lbl_status)
+
+        hint = QLabel(
+            "OCR は「⚙ 設定」内のメイン Tesseract 設定を共用します。"
+            "対象ウィンドウもメイン設定の値を使用。"
+            "オーバーレイ位置は overlay_pos に保存されます。"
+        )
+        hint.setStyleSheet("color:#666; font-size:11px;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        lay.addStretch(1)
+
+        m.updated.connect(self._exp_refresh)
+        m.status_changed.connect(self._exp_on_status)
+        m.error.connect(self._exp_on_error)
+
+        self._exp_refresh()
+        return w
+
+    def _exp_pick_region(self) -> None:
+        from .region_picker import RegionPickerDialog
+        title = (
+            self._settings.get("window_title")
+            or self._exp_meter.window_title
+            or ""
+        )
+        if not title:
+            QMessageBox.information(
+                self, "情報",
+                "先にメイン設定の対象ウィンドウを指定してください",
+            )
+            return
+        dlg = RegionPickerDialog(
+            title, self._exp_meter.region_rel, self,
+        )
+        if dlg.exec():
+            r = dlg.get_rel()
+            if r:
+                self._exp_meter.region_rel = r
+                self._exp_meter.save()
+                self._exp_refresh()
+
+    def _exp_on_hint_changed(self, *_) -> None:
+        self._exp_meter.digit_hint = 2 if self._exp_rb2.isChecked() else 1
+        self._exp_meter.save()
+
+    def _exp_on_interval_changed(self, v: int) -> None:
+        self._exp_meter.set_interval(int(v))
+
+    def _exp_toggle(self) -> None:
+        m = self._exp_meter
+        # 開始時に window_title をメイン設定と同期
+        m.window_title = (
+            self._settings.get("window_title") or m.window_title or ""
+        )
+        if m.running:
+            m.stop()
+        else:
+            m.start()
+        self._exp_refresh()
+
+    def _exp_reset(self) -> None:
+        ret = QMessageBox.question(
+            self, "確認", "サンプルと累積値をリセットしますか？",
+        )
+        if ret == QMessageBox.Yes:
+            self._exp_meter.reset()
+            self._exp_refresh()
+
+    def _exp_show_overlay(self) -> None:
+        m = self._exp_meter
+        if not m.running:
+            QMessageBox.information(
+                self, "情報",
+                "計測中にのみオーバーレイを表示できます",
+            )
+            return
+        if self._exp_overlay is None:
+            self._exp_overlay = ExpOverlayWindow(m)
+            self._exp_overlay.request_setup.connect(self._exp_overlay_return)
+            self._exp_overlay.request_toggle.connect(self._exp_toggle)
+            self._exp_overlay.request_reset.connect(self._exp_reset)
+            self._exp_overlay.request_quit.connect(self._exp_overlay_close)
+        pos = self._settings.get("overlay_pos")
+        if pos and isinstance(pos, list) and len(pos) == 2:
+            self._exp_overlay.move(int(pos[0]), int(pos[1]))
+        self._exp_overlay.show()
+
+    def _exp_overlay_return(self) -> None:
+        """オーバーレイの ⚙ ボタン: 経験値タブを最前面に呼び戻す。"""
+        if self._exp_overlay is not None:
+            p = self._exp_overlay.pos()
+            self._settings["overlay_pos"] = [p.x(), p.y()]
+            save_settings(self._settings)
+            self._exp_overlay.hide()
+        # 経験値タブをアクティブにしてからメインを前面化
+        for i in range(self._tabs.count()):
+            if self._tabs.tabText(i) == "経験値":
+                self._tabs.setCurrentIndex(i)
+                break
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _exp_overlay_close(self) -> None:
+        if self._exp_overlay is not None:
+            p = self._exp_overlay.pos()
+            self._settings["overlay_pos"] = [p.x(), p.y()]
+            save_settings(self._settings)
+            self._exp_overlay.close()
+            self._exp_overlay = None
+
+    def _exp_on_status(self, s: str) -> None:
+        self._exp_lbl_status.setText(s)
+        self._exp_lbl_status.setStyleSheet("color:#666; font-size:11px;")
+
+    def _exp_on_error(self, s: str) -> None:
+        self._exp_lbl_status.setText(f"⚠ {s}")
+        self._exp_lbl_status.setStyleSheet("color:#c62828; font-size:11px;")
+
+    def _exp_refresh(self) -> None:
+        m = self._exp_meter
+        self._exp_btn_start.setText("■ 停止" if m.running else "▶ 計測開始")
+        self._exp_btn_start.setStyleSheet(
+            "QPushButton{background:#c62828;color:white;font-weight:bold;}"
+            if m.running else ""
+        )
+        self._exp_btn_overlay.setEnabled(m.running)
+
+        if m.region_rel:
+            r = m.region_rel
+            self._lbl_exp_region.setText(
+                f"✓ 設定済み  (x={r[0]:.3f} y={r[1]:.3f} "
+                f"w={r[2]:.3f} h={r[3]:.3f})"
+            )
+            self._lbl_exp_region.setStyleSheet("color:#2e7d32;")
+        else:
+            self._lbl_exp_region.setText("⚠ 未設定")
+            self._lbl_exp_region.setStyleSheet("color:#c62828;")
+
+        self._exp_lbl_current.setText(
+            f"現在値:  {m.prev_raw:.4f}%" if m.prev_raw is not None
+            else "現在値:  —"
+        )
+        cur = m.current_speed()
+        avg = m.avg_speed()
+        n = len(m.samples)
+        if cur is not None:
+            self._exp_lbl_cspd.setText(f"現在速度:  {cur:.1f} %/h")
+        elif n > 0:
+            self._exp_lbl_cspd.setText(
+                f"現在速度:  — (あと{max(0, CURRENT_WINDOW - n)}サンプル)"
+            )
+        else:
+            self._exp_lbl_cspd.setText("現在速度:  —")
+        self._exp_lbl_aspd.setText(
+            f"平均速度:  {avg:.1f} %/h" if avg is not None
+            else "平均速度:  —"
+        )
+
+        eta_cur, eta_avg = m.eta_to_levelup()
+        now = datetime.now()
+        parts: list[str] = []
+        for e, lab in ((eta_cur, "現在"), (eta_avg, "平均")):
+            if e is None:
+                continue
+            if e >= 60:
+                h, mn = divmod(int(e), 60)
+                eta_str = f"{h}h{mn:02d}m"
+            else:
+                eta_str = f"{int(e)}分"
+            target = now + timedelta(minutes=int(e))
+            if target.date() == now.date():
+                abs_str = target.strftime("%H:%M")
+            else:
+                abs_str = target.strftime("%m/%d %H:%M")
+            parts.append(f"{eta_str}（{lab} → {abs_str}）")
+        self._exp_lbl_eta.setText(
+            "LvUP予測:  " + "  /  ".join(parts) if parts else "LvUP予測:  —"
+        )
+
+        last = m.samples[-1][0].strftime("%H:%M") if m.samples else "—"
+        self._exp_lbl_meta.setText(
+            f"計測: {m.elapsed_str()}  {n}サンプル  最終: {last}"
+        )
 
     # ---- 翻訳タブ: 領域の定期キャプチャ → Claude API 翻訳、ユーザー入力翻訳
     def _build_tab_translation(self) -> QWidget:
@@ -2610,6 +2882,18 @@ class PcFlowWindow(QWidget):
         self._runner.stop()
         if hasattr(self, "_recorder"):
             self._recorder.stop()
+        # 経験値計測 + オーバーレイ
+        if hasattr(self, "_exp_meter"):
+            self._exp_meter.stop()
+            self._exp_meter.save()
+        if self._exp_overlay is not None:
+            p = self._exp_overlay.pos()
+            self._settings["overlay_pos"] = [p.x(), p.y()]
+            save_settings(self._settings)
+            try:
+                self._exp_overlay.close()
+            except Exception:
+                pass
         # 翻訳ループも停止
         if hasattr(self, "_tr_stop"):
             self._tr_stop.set()

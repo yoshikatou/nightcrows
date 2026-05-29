@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from .capture import capture_window
+from .capture_clean import capture_window_clean
 from .logger import write_log
 from .pc_canvas import PcSnapshotCanvas, RegionMarker
 from .pc_scene import SCENES_DIR
@@ -332,7 +333,9 @@ class WatcherEditorWindow(QWidget):
                 f"ウィンドウが見つかりません: {self._window_title}",
             )
             return
-        img = capture_window(hwnd)
+        # 自分側ウィンドウが対象ゲームに重なって映り込むのを避けるため、
+        # 取得中だけ全 top-level widget を画面外に退避する
+        img = capture_window_clean(hwnd)
         if img is None:
             QMessageBox.warning(self, "エラー", "キャプチャに失敗しました")
             return

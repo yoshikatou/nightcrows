@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .capture import capture_window
+from .capture_clean import capture_window_clean
 from .window_picker import find_hwnd_by_title
 
 
@@ -288,7 +289,8 @@ class RegionPickerDialog(QDialog):
         if not hwnd:
             self._canvas.setToolTip(f"ウィンドウが見つかりません: {self._window_title}")
             return
-        img = capture_window(hwnd)
+        # 自分側ウィンドウ（このダイアログ含む）を画面外に退避してから撮影
+        img = capture_window_clean(hwnd)
         if img is None:
             self._canvas.setToolTip("キャプチャに失敗しました（最小化中の可能性）")
             return

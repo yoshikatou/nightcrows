@@ -125,6 +125,35 @@ HID単位 = int(ステップ / speed_scale)
 
 キャリブレーション済みであれば通常 1〜3 回で収束する。
 
+### `click_at()` の短距離 detour 経由化
+
+短距離（距離 ≤ `_SHORT_MOVE_THRESHOLD_PX = 80 px`）の click_at は、直接 target へ向かう代わりに **必ず長距離アプローチを踏ませる**。target から `_SHORT_MOVE_DETOUR_OFFSET_PX = 300 px` 離れた detour 位置へ一旦ジャンプし、そこから target へ `move_to_accurate` で戻す方式。
+
+**なぜ detour が必要か:**
+
+- 直接の短距離 HID 相対移動だと、リモート無しのローカル単独運用でも視覚的にクリック位置が下にズレる事象が出ていた
+- GetCursorPos ベースの誤差は ±2-3 px に収まっているのに着弾点がズレるため、原因は HID 加速の建ち上がり不足 / 終端の沈み込みと推定（短距離だと OS のポインター加速が機能する前に動作が終わる）
+- detour 経由なら必ず「長距離アプローチ」になり、`move_to_accurate` の ease-out + 補正ループが効く環境にカーソルを持ち込める
+
+**実装パラメータ:**
+
+| 定数 | 値 | 意味 |
+|---|---|---|
+| `_SHORT_MOVE_THRESHOLD_PX` | 80 | この距離以下は detour 経由 |
+| `_SHORT_MOVE_DETOUR_OFFSET_PX` | 300 | target から detour 位置までの距離 |
+| インスタンス属性 `short_move_detour` | `True`（既定） | 切戻し用フラグ。`False` で旧挙動（短距離直行 step=5, delay=0.04） |
+
+detour 位置は target 座標が `offset` より大きい側からは引き、小さい側からは加えることで画面端を避ける:
+
+```
+detour_x = x - 300 if x > 300 else x + 300
+detour_y = y - 300 if y > 300 else y + 300
+```
+
+**コスト:** 1 タップあたり ~500-700ms 増。9 タップのポーション補給シーンで約 5 秒増。実機検証 (2026-05-29) で短距離タップのズレが解消したのを確認。
+
+**運用方針:** 既定 ON 維持。劣化が出たら閾値や offset の微調整で対応し、`short_move_detour = False` への切戻しは最終手段。詳細経緯は `docs/changelog.md` の 2026-05-29 エントリ参照。
+
 ### 絶対座標クリックについて
 
 ```

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QAction, QCursor, QMouseEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QPushButton, QWidget
@@ -52,7 +54,7 @@ class OverlayWindow(QWidget):
         self._lbl_st    = QLabel("")
         self._lbl_cur.setFixedWidth(105)
         self._lbl_spd.setFixedWidth(110)
-        self._lbl_eta.setFixedWidth(95)
+        self._lbl_eta.setFixedWidth(155)
         self._lbl_st.setFixedWidth(20)   # ⚠ アイコン用、長文は省略
         self._lbl_st.setAlignment(Qt.AlignCenter)
         for w in (self._lbl_cur, self._lbl_spd, self._lbl_eta, self._lbl_st):
@@ -116,9 +118,16 @@ class OverlayWindow(QWidget):
         if eta_min is not None:
             if eta_min >= 60:
                 h, mn = divmod(int(eta_min), 60)
-                self._lbl_eta.setText(f"残 {h}h{mn:02d}m")
+                eta_str = f"{h}h{mn:02d}m"
             else:
-                self._lbl_eta.setText(f"残 {int(eta_min)}分")
+                eta_str = f"{int(eta_min)}分"
+            now = datetime.now()
+            target = now + timedelta(minutes=int(eta_min))
+            if target.date() == now.date():
+                abs_str = target.strftime("%H:%M")
+            else:
+                abs_str = target.strftime("%m/%d %H:%M")
+            self._lbl_eta.setText(f"残 {eta_str} → {abs_str}")
         else:
             self._lbl_eta.setText("残 —")
 

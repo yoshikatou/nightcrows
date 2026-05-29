@@ -5,9 +5,7 @@
   "steps": [
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210432_362777.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210432_362777.png"
     },
     {
       "type": "tap",
@@ -21,9 +19,7 @@
     },
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210443_519812.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210443_519812.png"
     },
     {
       "type": "tap",
@@ -37,9 +33,7 @@
     },
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210455_672483.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210455_672483.png"
     },
     {
       "type": "tap",
@@ -49,19 +43,26 @@
     },
     {
       "type": "wait_fixed",
-      "seconds": 1.5
+      "seconds": 3.5
     },
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210517_450021.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210517_450021.png"
     },
     {
-      "type": "tap",
-      "rx": 0.2975,
-      "ry": 0.6698,
-      "duration_ms": 50
+      "type": "tap_image",
+      "template": "templates/BF3 94LV/tpl_20260529_165405_306822.png",
+      "threshold": 0.8500000000000001,
+      "timeout_s": 10.0,
+      "region": [
+        0.2089,
+        0.538,
+        0.1862,
+        0.225
+      ],
+      "duration_ms": 50,
+      "tap_offset_x": 0,
+      "tap_offset_y": 0
     },
     {
       "type": "wait_fixed",
@@ -69,9 +70,7 @@
     },
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210527_321412.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210527_321412.png"
     },
     {
       "type": "tap",
@@ -85,15 +84,11 @@
     },
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210534_632575.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210534_632575.png"
     },
     {
       "type": "snapshot",
-      "path": "snapshots/snap_20260523_210604_684310.png",
-      "threshold": 0.85,
-      "timeout_s": 10.0
+      "path": "snapshots/snap_20260523_210604_684310.png"
     },
     {
       "type": "tap",

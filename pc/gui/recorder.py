@@ -46,6 +46,7 @@ class WindowRecorder(QObject):
         self._current_path: str | None = None
         self._frame_count = 0
         self._start_time = 0.0
+        self._prefix = "rec"
 
     @property
     def is_recording(self) -> bool:
@@ -65,12 +66,13 @@ class WindowRecorder(QObject):
             return 0.0
         return time.time() - self._start_time
 
-    def start(self, hwnd: int, fps: float = 2.0) -> None:
+    def start(self, hwnd: int, fps: float = 2.0, prefix: str = "rec") -> None:
         if self.is_recording:
             return
         self._stop_flag = False
         self._frame_count = 0
         self._start_time = time.time()
+        self._prefix = prefix
         os.makedirs(RECORDINGS_DIR, exist_ok=True)
         self._thread = threading.Thread(
             target=self._run, args=(hwnd, fps), daemon=True,
@@ -85,7 +87,7 @@ class WindowRecorder(QObject):
         self, fps: float, w: int, h: int,
     ) -> tuple[cv2.VideoWriter, str]:
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(RECORDINGS_DIR, f"rec_{ts}.mp4").replace("\\", "/")
+        path = os.path.join(RECORDINGS_DIR, f"{self._prefix}_{ts}.mp4").replace("\\", "/")
         writer = cv2.VideoWriter(path, FOURCC, fps, (w, h))
         if not writer.isOpened():
             raise RuntimeError(f"VideoWriter を開けません: {path}")

@@ -14,5 +14,7 @@ pc/*.spec
 pc/tools/
 pc/snapshots/
 pc/debug/
+pc/recordings/
+pc/state/
 .claude/
 refs/

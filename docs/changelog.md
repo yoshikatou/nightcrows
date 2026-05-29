@@ -4,6 +4,138 @@
 
 ---
 
+## 2026-05-29（短距離 click_at の detour 経由化 + 経験値タブ追加 + 手動スクショの映り込み対策 + 画像ステップの値編集 GUI）
+
+### tap_image / wait_image の値編集ダイアログを追加 (`pc/gui/image_step_dialog.py` 新規, `pc_scene_editor.py`)
+
+**動機:** tap_image で「テンプレ＝region と同サイズ」だとスライド余地ゼロで実質マッチ不可。閾値や探索領域を調整したくても、これまで JSON 直接編集しか手段が無く敷居が高かった。さらに「どの画像をどこで探すか」がダイアログ上で見えず、人間の感覚で対応関係を掴みにくかった。
+
+**修正:**
+- `pc/gui/image_step_dialog.py` を新設、`ImageStepEditDialog` を提供
+  - **「探したい画像 (テンプレート)」プレビュー**: テンプレ画像と px サイズを表示
+  - **検出条件** グループ: 一致閾値 / タイムアウト
+  - **「探す場所」(ゲーム画面のクライアント比率)** グループ: X/Y/W/H スピンまたは「領域なし」チェック
+  - **テスト** グループ: 「▶ 今のゲーム画面でテスト」ボタン
+    - 現在のゲーム画面をキャプチャ → 現在の設定で `matchTemplate` 実行
+    - 結果を表示: ✓ 一致 score=0.87 / ✗ 不一致 best score=0.65 / ⚠ 探索領域がテンプレより小さい 等
+    - 一致候補位置を **緑(一致)/赤(不一致) の枠** で重ねた領域プレビューを表示
+  - **クリック位置オフセット** (tap_image のみ): テンプレ中心からの相対 px
+  - **「テンプレを変更…」ボタン**: 現在のゲーム画面をキャプチャ → `RegionPickerDialog` でドラッグして新テンプレ領域を選択 → `templates/<シーン名>/tpl_<ts>.png` に保存して差替え（ダイアログを閉じずに完結）
+  - **「範囲を画像で選択…」ボタン**: 同じく `RegionPickerDialog` で探す範囲をドラッグ → X/Y/W/H に自動反映、「領域なし」チェックは自動解除
+- scene editor の `_edit_step_params` ハンドラに `tap_image` / `wait_image` を登録
+- 呼出側から `window_title` を渡してテスト機能で対象ゲームをキャプチャできるよう拡張
+- ステップ選択 → 「⚙ 値編集」ボタンで起動
+
+
+
+### 手動スクショ撮影時に自分側ウィンドウを退避 (`pc/gui/capture_clean.py` 新規, `pc_scene_editor.py`, `pc_watcher_editor.py`, `region_picker.py`)
+
+**背景:** 1 画面運用で編集ウィンドウ等が対象ゲームに重なっていると、Nightcrows のような DirectX 系では PrintWindow が空フレームを返し画面 BitBlt フォールバックになり、自分側 GUI が映り込んでしまう。
+
+**修正:**
+- `pc/gui/capture_clean.py` を新設、`capture_window_clean(hwnd, settle_s=0.15)` を提供
+- 撮影中だけ `QApplication.topLevelWidgets()` の可視 widget 全てを `(-30000, -30000)` へ move、150ms 待ってからキャプチャ、finally で元位置に戻す
+- 適用箇所: scene editor / watcher editor の `_capture_snapshot` と `RegionPickerDialog._capture`
+- ポーリング系（ウォッチャー監視・経験値 OCR・録画）は毎回ちらつくため対象外。元の `capture_window` をそのまま使う
+
+
+
+### フロー側 GUI に経験値計測タブを追加 (`pc/gui/pc_main.py`)
+
+**動機:** 独立した「経験値メーター」アプリ (`run_exp_meter.py` / `gui/main.py`) の機能を、フロー制御アプリ側にも組込んで、別アプリを並行起動しなくても経験値の自動計測ができるようにする。
+
+**実装:**
+- 既に import されていた `ExpMeter` を実体化（`self._exp_meter`、`self._exp_overlay`）
+- 録画タブの次に「経験値」タブを追加（`_build_tab_exp_meter`）
+  - 計測領域（RegionPickerDialog 起動）、桁数ヒント、計測間隔の設定
+  - 現在値 / 現在速度 / 平均速度 / LvUP 予測 / 計測時間 表示
+  - ▶ 計測開始 / 🔄 リセット / 🗕 ゲーム画面に重ねる
+- オーバーレイは独立アプリと同じ `OverlayWindow` を `ExpOverlayWindow` として再利用、位置は `overlay_pos` で永続化
+- 対象ウィンドウとTesseract設定はフロー側のメイン設定を共用（個別欄なし）
+- 状態は `exp_meter.json` で永続化（独立アプリとデータ共有）
+- closeEvent で stop + save + オーバーレイ位置保存
+
+
+
+### `click_at` 短距離移動に detour（遠回り）モードを追加 (`pc/pico_mouse.py`)
+
+**背景:** リモート接続無しでも、短距離 (≤80px) のタップだけ視覚的にズレる事象がポーション補給シーン等で観測される。GetCursorPos ベースの誤差は ±2-3px に収まっているのに着弾点が下にズレるため、HID 加速の建ち上がり不足 / 終端の沈み込みが疑われる。
+
+**修正:**
+- `click_at` の短距離分岐で、`short_move_detour=True`（既定）なら target から `_SHORT_MOVE_DETOUR_OFFSET_PX=300` 離れた位置へ一旦ジャンプしてから target へ長距離アプローチ
+- 画面端で detour 位置が範囲外にならないよう、target 座標が `off` より大きい側からは引き、小さい側からは加える
+- 旧挙動（短距離直行モード）は `mouse.short_move_detour = False` で復活
+- 1 タップあたり ~500-700ms 増。9 タップ程度のシーンで約 5 秒増の見込み
+
+**検証:** 次回 BF3 94LV シーンや ポーション補給シーンを再生し、短距離タップの着弾点がズレなくなるか確認。改善しなければ revert + 別アプローチ。
+
+---
+
+## 2026-05-28（昨日フォールバック + ウォッチャー発火の自動録画 + if_image インライン手順）
+
+### `if_image` ステップに then/else インライン手順を追加 (`pc/gui/pc_scene.py`, `pc/gui/if_image_dialog.py`, `pc/gui/pc_scene_editor.py`)
+
+**動機:** 「特定の画像が見えたらクリック、無ければ別の処理」のような分岐を、わざわざ別シーンファイルに分けずに 1 つの if_image ステップ内に書きたい要望。
+
+**スキーマ変更:**
+```json
+{
+  "type": "if_image",
+  "template": "templates/.../btn.png",
+  "threshold": 0.85,
+  "region": [...],
+  "then": [
+    {"type": "tap", "rx": 0.5, "ry": 0.6},
+    {"type": "wait_fixed", "seconds": 1.5}
+  ],
+  "else": []
+}
+```
+
+- `then` / `else` がリスト（非空）ならインライン手順として再帰実行（`depth+1`、循環参照チェックは _call_stack 経由で継続）
+- 空または未指定なら従来の `then_scene` / `else_scene`（シーン名）にフォールバック
+- インラインで使えるステップタイプ（ダイアログ経由）: `tap` / `wait_fixed` / `keyevent` / `call_scene`
+- それ以外（`tap_image` / `wait_image` / `swipe` 等の位置指定が必要なもの）はキャンバスでの作成が前提のため、現状インラインでは扱わない
+
+**編集 UI:** 新規 `pc/gui/if_image_dialog.py` の `IfImageEditDialog`。
+- ステップ一覧で if_image を選択 → 「⚙ 値編集」ボタンでダイアログを開く
+- 成立時 / 不成立時 それぞれで「インライン手順 / シーン呼出 / 何もしない」を切替
+- インライン手順は QListWidget で追加・編集・並べ替え・削除
+
+**追加エントリポイント:**「+ その他のステップ ▾」メニューに「画像で分岐 追加」を新設。クリックすると:
+- 「ドラッグで作る (推奨)」: キャンバスドラッグ手順を案内するメッセージ
+- 「既存テンプレ画像を選ぶ」: `templates/` からファイル選択 → そのまま IfImageEditDialog が開く
+
+**ステップラベル:** インライン手順がある場合は「成立→[インライン N 手順]」「成立→<scene_name>」「成立→(なし)」を切替表示
+
+### `_settle_before_click` を revert (`pc/pico_mouse.py`)
+
+TeamViewer 経由でクリック位置がズレる事象の対策として入れた settle ロジックが、ローカル単発でもズレを起こす副作用が出た（短ステップ移動 + GetCursorPos 安定待ちでカーソル微小揺らぎの吸収を仕損ね、補正 move_to が悪化させた可能性）。原因究明を優先するため `_settle_before_click` および関連定数を削除し `click_at` を直前のシンプル実装へ戻した。
+
+### `last_due_scenes` に昨日フォールバックを追加 (`pc/gui/pc_flow.py`)
+
+**背景:** 5/28 03:33 に死亡ウォッチャーが発火したが、当日の最初のスケジュール（daily 06:10 DQ）より前の時刻だったため `last_due_scenes` が `None` を返し、`after=restart_scene` が「直近スケジュールが見つからずスキップ」となった。
+
+**修正:** 候補抽出を `_due_scenes_on(flow, target_date, max_hm_exclusive)` に切り出し、`last_due_scenes` は今日 → 昨日の 2 段階探索に拡張。昨日は曜日 / once 日付も対象日付基準で判定し直す。
+
+### ウォッチャー発火→ハンドラー完了の自動録画 (`pc/gui/pc_flow.py`, `pc/gui/recorder.py`, `pc/gui/pc_main.py`)
+
+**目的:** 発火時の handler シーンがどこまで進んだかを後追い確認するため、発火〜handler 完了の区間を自動録画する。
+
+**実装:**
+- `WindowRecorder.start(..., prefix="rec")` でファイル名プレフィックスを差し替え可能に
+- `PcFlowRunner.set_recorder(recorder, fps)` で `pc_main` 側の `WindowRecorder` を共有
+- `_handle_fired` 内の `_run_scene(handler)` 前後で `_start_auto_record` / `_stop_auto_record` を呼ぶ
+- 手動録画中（`is_recording=True`）の発火では自動録画はスキップして既存セッションを尊重
+- 録画ファイル名: `rec_watcher_<title>_YYYYMMDD_HHMMSS.mp4`
+- 録画タブの FPS スピンボックス変更が自動録画にも反映される
+
+### シーン編集「選択行を実行」を複数選択対応 (`pc/gui/pc_scene_editor.py`)
+
+`_list_steps` を `ExtendedSelection` に変更。Ctrl/Shift クリックで複数行選択 → 「選択行を実行」で昇順連続実行。`_launch_thread` に `rows: list[int]` 引数を追加し、非連続選択でも正しくハイライト。DEL キーも複数行削除に対応。
+
+---
+
 ## 2026-05-23（フロー編集ウィンドウ・曜日ページャー・シーン編集の日本語化）
 
 ### メイン「実行」タブを曜日フィルタ + ページ送りに改造

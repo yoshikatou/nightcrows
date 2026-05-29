@@ -16,7 +16,7 @@
     "ocr_whitelist": "0123456789",
     "op": "<=",
     "value": 400.0,
-    "consecutive": 5
+    "consecutive": 10
   },
   "handler": "ポーション補給.json",
   "after": "restart_scene",

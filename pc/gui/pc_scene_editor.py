@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -43,6 +44,9 @@ from PySide6.QtWidgets import (
 )
 
 from .capture import capture_window
+from .capture_clean import capture_window_clean
+from .if_image_dialog import IfImageEditDialog
+from .image_step_dialog import ImageStepEditDialog
 from .pc_canvas import PcSnapshotCanvas, RegionMarker, TapMarker
 from .pc_scene import (
     SCENES_DIR,
@@ -210,7 +214,8 @@ class SceneEditorWindow(QWidget):
         # ドラッグで並べ替え（行内のリオーダリング専用）
         self._list_steps.setDragDropMode(QAbstractItemView.InternalMove)
         self._list_steps.setDefaultDropAction(Qt.MoveAction)
-        self._list_steps.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Ctrl+クリック / Shift+クリックで複数行選択 → 「選択行を実行」で連続実行
+        self._list_steps.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._list_steps.itemSelectionChanged.connect(self._on_step_selected)
         self._list_steps.itemDoubleClicked.connect(self._on_step_double_clicked)
         self._list_steps.rows_reordered.connect(self._on_rows_reordered)
@@ -256,6 +261,9 @@ class SceneEditorWindow(QWidget):
         # 実行コントロール
         run_row = QHBoxLayout()
         self._btn_run_one = QPushButton("選択行を実行")
+        self._btn_run_one.setToolTip(
+            "選択中の行を上から順に実行（Ctrl/Shift クリックで複数選択可）"
+        )
         self._btn_run_one.clicked.connect(self._run_selected_step)
         self._btn_play    = QPushButton("▶ 再生")
         self._btn_play.clicked.connect(self._toggle_play)
@@ -298,7 +306,9 @@ class SceneEditorWindow(QWidget):
                 f"ウィンドウが見つかりません: {self._scene.window_title}",
             )
             return
-        img = capture_window(hwnd)
+        # 自分側ウィンドウが対象ゲームに重なって映り込むのを避けるため、
+        # 取得中だけ全 top-level widget を画面外に退避する
+        img = capture_window_clean(hwnd)
         if img is None:
             QMessageBox.warning(self, "エラー", "キャプチャに失敗しました")
             return
@@ -660,6 +670,9 @@ class SceneEditorWindow(QWidget):
             "wait_fixed":   self._edit_params_wait_fixed,
             "keyevent":     self._edit_params_keyevent,
             "group_header": self._edit_params_group_header,
+            "if_image":     self._edit_params_if_image,
+            "tap_image":    self._edit_params_image_step,
+            "wait_image":   self._edit_params_image_step,
         }
         h = handlers.get(step.type)
         if h is None:
@@ -713,6 +726,28 @@ class SceneEditorWindow(QWidget):
         step.params["label"] = text.strip()
         return True
 
+    def _edit_params_if_image(self, step: PcStep) -> bool:
+        dlg = IfImageEditDialog(step.params, self._list_scenes, self)
+        if dlg.exec() != IfImageEditDialog.Accepted:
+            return False
+        step.params.update(dlg.collect())
+        return True
+
+    def _edit_params_image_step(self, step: PcStep) -> bool:
+        """tap_image / wait_image の threshold/timeout/region/オフセットを編集。"""
+        dlg = ImageStepEditDialog(
+            step.type, step.params, self._scene.window_title, self,
+        )
+        if dlg.exec() != ImageStepEditDialog.Accepted:
+            return False
+        updates = dlg.collect()
+        if updates.get("region") is None:
+            # 領域なし = params から削除（バックエンドは欠落で全体探索）
+            step.params.pop("region", None)
+            updates.pop("region", None)
+        step.params.update(updates)
+        return True
+
     def _add_wait_fixed(self) -> None:
         v, ok = QInputDialog.getDouble(
             self, "待機", "待機秒数:", 1.0, 0.1, 600.0, 1,
@@ -733,9 +768,58 @@ class SceneEditorWindow(QWidget):
         menu = QMenu(self)
         menu.addAction("シーン呼び出し 追加", self._add_call_scene)
         menu.addAction("シーン抽選 追加",     self._add_pick_scene)
+        menu.addAction("画像で分岐 追加",     self._add_if_image_from_menu)
         menu.addAction("キー入力 追加",       self._add_keyevent)
         menu.addAction("見出し 追加",         self._add_group_header)
         menu.exec(QCursor.pos())
+
+    def _add_if_image_from_menu(self) -> None:
+        """メニュー「画像で分岐 追加」から起動するエントリポイント。
+
+        テンプレート画像の取得方法をユーザに選ばせる:
+            - ドラッグで作る (推奨): キャンバス上でドラッグ → 「画像で分岐」を選ぶ
+              通常フロー（既存）への誘導メッセージを出す
+            - 既存テンプレを選ぶ: templates/ からファイル選択 → 即座に IfImageEditDialog
+        """
+        choices = ["ドラッグで作る (推奨)", "既存テンプレ画像を選ぶ"]
+        choice, ok = QInputDialog.getItem(
+            self, "画像で分岐 追加",
+            "テンプレート画像の取得方法:",
+            choices, 0, False,
+        )
+        if not ok:
+            return
+        if choice == choices[0]:
+            QMessageBox.information(
+                self, "画像で分岐 追加",
+                "キャンバス上で対象の画像領域をドラッグ → "
+                "メニューから「画像をタップ」または「画像で分岐」を選んでください。",
+            )
+            return
+        tpl_path, _ = QFileDialog.getOpenFileName(
+            self, "テンプレート画像を選択", TEMPLATES_DIR,
+            "PNG files (*.png);;All files (*)",
+        )
+        if not tpl_path:
+            return
+        tpl_path = tpl_path.replace("\\", "/")
+        step = PcStep(
+            type="if_image",
+            params={
+                "template": tpl_path,
+                "threshold": 0.85,
+                "then": [],
+                "else": [],
+            },
+        )
+        # 直後に IfImageEditDialog を開いて then/else を設定してもらう
+        dlg = IfImageEditDialog(step.params, self._list_scenes, self)
+        if dlg.exec() != IfImageEditDialog.Accepted:
+            return
+        step.params.update(dlg.collect())
+        self._scene.steps.append(step)
+        self._refresh_steps()
+        self._list_steps.setCurrentRow(len(self._scene.steps) - 1)
 
     def _add_call_scene(self) -> None:
         scenes = self._list_scenes()
@@ -953,9 +1037,20 @@ class SceneEditorWindow(QWidget):
             return f"{i+1:02d}. 📞 シーン呼び出し → {p.get('scene', '')}"
         if s.type == "if_image":
             name = os.path.basename(str(p.get("template", "")))
+
+            def _branch_desc(branch_key: str) -> str:
+                inline = p.get(branch_key)
+                scene_name = str(p.get(f"{branch_key}_scene", ""))
+                if inline:
+                    return f"[インライン {len(inline)} 手順]"
+                if scene_name:
+                    return scene_name
+                return "(なし)"
+
             return (
                 f"{i+1:02d}. ❓ 画像で分岐  {name}  "
-                f"成立→{p.get('then_scene', '')}  不成立→{p.get('else_scene', '')}"
+                f"成立→{_branch_desc('then')}  "
+                f"不成立→{_branch_desc('else')}"
             )
         if s.type == "pick_scene":
             scenes = p.get("scenes", []) or []
@@ -1028,15 +1123,26 @@ class SceneEditorWindow(QWidget):
         self._canvas.set_markers(taps=taps, regions=regions)
 
     def _remove_step(self) -> None:
-        row = self._list_steps.currentRow()
-        if row < 0:
+        # 複数選択対応: 選択中の行をまとめて削除
+        rows = sorted(
+            {i.row() for i in self._list_steps.selectedIndexes()},
+            reverse=True,
+        )
+        rows = [r for r in rows if 0 <= r < len(self._scene.steps)]
+        if not rows:
+            cur = self._list_steps.currentRow()
+            if 0 <= cur < len(self._scene.steps):
+                rows = [cur]
+        if not rows:
             return
-        del self._scene.steps[row]
+        # 降順削除でインデックスズレ回避
+        for r in rows:
+            del self._scene.steps[r]
         self._refresh_steps()
-        if row >= len(self._scene.steps):
-            row = len(self._scene.steps) - 1
-        if row >= 0:
-            self._list_steps.setCurrentRow(row)
+        # フォーカス行: 削除した最小 row を残す位置に寄せる
+        new_row = min(rows[-1], len(self._scene.steps) - 1)
+        if new_row >= 0:
+            self._list_steps.setCurrentRow(new_row)
 
     def _move_step(self, direction: int) -> None:
         row = self._list_steps.currentRow()
@@ -1081,13 +1187,26 @@ class SceneEditorWindow(QWidget):
         if self._play_thread and self._play_thread.is_alive():
             self._append_run_log("⚠ 実行中です")
             return
-        row = self._list_steps.currentRow()
-        if row < 0 or row >= len(self._scene.steps):
+        # 複数選択（Ctrl/Shift クリック）対応: 選択行を昇順で連続実行
+        rows = sorted({i.row() for i in self._list_steps.selectedIndexes()})
+        rows = [r for r in rows if 0 <= r < len(self._scene.steps)]
+        if not rows:
+            cur = self._list_steps.currentRow()
+            if 0 <= cur < len(self._scene.steps):
+                rows = [cur]
+        if not rows:
             self._append_run_log("⚠ ステップ未選択")
             return
-        step = self._scene.steps[row]
-        self._append_run_log(f"--- 単発実行 #{row + 1}: {step.type} ---")
-        self._launch_thread([step], start_row=row)
+        steps = [self._scene.steps[r] for r in rows]
+        if len(rows) == 1:
+            label = f"#{rows[0] + 1}: {steps[0].type}"
+        else:
+            label = (
+                f"選択 {len(rows)} 行 "
+                f"(#{rows[0] + 1}〜#{rows[-1] + 1})"
+            )
+        self._append_run_log(f"--- 選択実行 {label} ---")
+        self._launch_thread(steps, rows=rows)
 
     def _toggle_play(self) -> None:
         if self._play_thread and self._play_thread.is_alive():
@@ -1098,9 +1217,19 @@ class SceneEditorWindow(QWidget):
             self._append_run_log("⚠ ステップがありません")
             return
         self._append_run_log(f"--- 再生: {self._scene.name} ({len(self._scene.steps)} ステップ) ---")
-        self._launch_thread(list(self._scene.steps), start_row=0)
+        self._launch_thread(
+            list(self._scene.steps),
+            rows=list(range(len(self._scene.steps))),
+        )
 
-    def _launch_thread(self, steps: list[PcStep], start_row: int = 0) -> None:
+    def _launch_thread(
+        self,
+        steps: list[PcStep],
+        rows: list[int] | None = None,
+        start_row: int = 0,
+    ) -> None:
+        if rows is None:
+            rows = list(range(start_row, start_row + len(steps)))
         self._stop_flag = False
         title = self._scene.window_title
         # 実行用に一時シーンを作る
@@ -1117,9 +1246,13 @@ class SceneEditorWindow(QWidget):
         if mouse is None:
             self._append_run_log("⚠ Pico 未接続（tap/swipe/tap_image はスキップされます）")
 
+        # rows[i-1] は steps[i-1] が実シーン上のどの行かを示す（非連続選択でも正しくハイライト）
+        rows_for_cb = list(rows)
+
         def _step_cb(i: int, _total: int) -> None:
-            # i は 1-based。実シーン上の row = start_row + (i - 1)
-            self._step_run_signal.emit(start_row + i - 1)
+            # i は 1-based
+            if 1 <= i <= len(rows_for_cb):
+                self._step_run_signal.emit(rows_for_cb[i - 1])
 
         def _worker() -> None:
             self._play_state_signal.emit(True)

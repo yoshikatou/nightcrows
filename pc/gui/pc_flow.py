@@ -237,33 +237,27 @@ def check_schedule(
     return idx, entry
 
 
-def last_due_scenes(
-    flow: PcFlow, now: datetime,
-) -> tuple[ScheduleEntry, list[str]] | None:
-    """現在時刻より前で直近のスケジュールエントリ (entry, シーンリスト) を返す。
+def _due_scenes_on(
+    flow: PcFlow, target_date: date, max_hm_exclusive: str,
+) -> list[tuple[str, ScheduleEntry, list[str]]]:
+    """target_date 上で、time < max_hm_exclusive の有効エントリ候補を列挙する。
 
-    シーン外でウォッチャーが発火し after=restart_scene が要求されたが
-    まだ当日シーンが実行されていない（深夜跨ぎ・起動直後など）場合の
-    フォールバックに使う。
-
-    曜日フィルタ・enabled / once 日付を考慮し、当日中で最も遅い時刻のエントリを返す。
-    seq エントリ単独はトリガー対象外（直前エントリ完了後の連鎖実行用途のため）。
+    曜日フィルタ・enabled / once 日付を考慮。seq エントリ単独はトリガー対象外。
+    `target_date` は曜日と once 日付の判定に使うだけで、現在時刻とは独立。
     """
-    current_hm = now.strftime("%H:%M")
-    today_str = now.date().isoformat()
-    today_wd = now.weekday()
-
-    candidates: list[tuple[str, ScheduleEntry, list[str]]] = []
+    target_str = target_date.isoformat()
+    target_wd = target_date.weekday()
+    cands: list[tuple[str, ScheduleEntry, list[str]]] = []
     for idx, entry in enumerate(flow.schedule):
         if not entry.enabled:
             continue
         if entry.seq:
             continue
-        if entry.time >= current_hm:
+        if entry.time >= max_hm_exclusive:
             continue
-        if entry.repeat == "once" and entry.date != today_str:
+        if entry.repeat == "once" and entry.date != target_str:
             continue
-        if entry.repeat == "weekly" and entry.days and today_wd not in entry.days:
+        if entry.repeat == "weekly" and entry.days and target_wd not in entry.days:
             continue
         scenes = list(entry_scenes(entry))
         # 直後に続く seq エントリも連鎖させる（スケジュール発火時と同じ挙動）
@@ -276,8 +270,28 @@ def last_due_scenes(
                 scenes.extend(entry_scenes(nxt))
             j += 1
         if scenes:
-            candidates.append((entry.time, entry, scenes))
+            cands.append((entry.time, entry, scenes))
+    return cands
 
+
+def last_due_scenes(
+    flow: PcFlow, now: datetime,
+) -> tuple[ScheduleEntry, list[str]] | None:
+    """現在時刻より前で直近のスケジュールエントリ (entry, シーンリスト) を返す。
+
+    シーン外でウォッチャーが発火し after=restart_scene が要求されたが
+    まだ当日シーンが実行されていない（深夜跨ぎ・起動直後など）場合の
+    フォールバックに使う。
+
+    探索順:
+      1. 今日: time < 現在時刻
+      2. 昨日: 全エントリ（深夜帯発火等で当日候補が無い場合のフォールバック）
+    各日内で最も時刻が遅いエントリを採用する。
+    """
+    candidates = _due_scenes_on(flow, now.date(), now.strftime("%H:%M"))
+    if not candidates:
+        yesterday = now.date() - timedelta(days=1)
+        candidates = _due_scenes_on(flow, yesterday, "99:99")
     if not candidates:
         return None
     candidates.sort(key=lambda t: t[0], reverse=True)
@@ -408,6 +422,10 @@ class PcFlowRunner(QObject):
         self._fg_last_decision_mono: float = 0.0   # キャッシュ確定時刻 (time.monotonic)
         self._fg_cache_seconds: float = 300.0      # 既定 5 分（UI から変更）
 
+        # ウォッチャー発火→ハンドラー完了の自動録画用（pc_main から WindowRecorder を渡す）
+        self._recorder = None
+        self._auto_record_fps: float = 2.0
+
     # ---- 公開 API ----
     @property
     def is_running(self) -> bool:
@@ -442,6 +460,15 @@ class PcFlowRunner(QObject):
     def set_notify_webhook(self, url: str) -> None:
         """Google Chat の Webhook URL を設定。空文字で通知無効。"""
         self._notify_webhook = (url or "").strip()
+
+    def set_recorder(self, recorder, fps: float = 2.0) -> None:
+        """ウォッチャー発火→ハンドラー完了の自動録画用に WindowRecorder を渡す。
+
+        None または未呼び出しの場合は自動録画を行わない。
+        既に手動録画中（recorder.is_recording=True）の場合は自動録画を開始しない。
+        """
+        self._recorder = recorder
+        self._auto_record_fps = max(0.5, float(fps))
 
     def load_flow(self, path: str) -> PcFlow:
         flow = load_pc_flow(path)
@@ -856,12 +883,48 @@ class PcFlowRunner(QObject):
                 self._log("⊘ ハンドラー実行をスキップ（前面化キャンセル）")
                 return "noop"
             self._watcher_paused.set()
+            rec_owned = self._start_auto_record(w)
             try:
                 self._log(f"ハンドラー実行: {w.handler}")
                 self._run_scene(w.handler)
             finally:
+                if rec_owned:
+                    self._stop_auto_record()
                 self._watcher_paused.clear()
         return w.after or "noop"
+
+    def _start_auto_record(self, w: PcWatcher) -> bool:
+        """発火に紐付く自動録画を開始する。開始したら True、見送りなら False。
+
+        手動録画が既に走っている場合は見送り（True を返すと停止してしまうので注意）。
+        """
+        rec = self._recorder
+        if rec is None or rec.is_recording:
+            return False
+        if not self._window_title:
+            return False
+        hwnd = find_hwnd_by_title(self._window_title)
+        if not hwnd:
+            self._log("⚠ 自動録画: ウィンドウが見つからずスキップ")
+            return False
+        safe_title = "".join(c if c.isalnum() else "_" for c in w.title)[:24]
+        prefix = f"rec_watcher_{safe_title}"
+        try:
+            rec.start(hwnd, fps=self._auto_record_fps, prefix=prefix)
+        except Exception as e:
+            self._log(f"⚠ 自動録画開始失敗: {e}")
+            return False
+        path = rec.current_path or ""
+        self._log(f"自動録画開始: {os.path.basename(path) if path else '(?)'}")
+        return True
+
+    def _stop_auto_record(self) -> None:
+        rec = self._recorder
+        if rec is None:
+            return
+        path = rec.current_path or ""
+        rec.stop()
+        self._log(f"自動録画停止: {os.path.basename(path) if path else '(?)'}")
 
     # ---------------------------------------------- メインループ
     def _run(self) -> None:

@@ -16,7 +16,11 @@ PC シーン JSON を読み込み、各ステップを順次実行する。
                 (rx1_jitter / ry1_jitter / rx2_jitter / ry2_jitter / duration_jitter_ms)
 - wait_fixed:   time.sleep()
 - call_scene:   別シーンを呼ぶ（最大階層 _MAX_CALL_DEPTH）
-- if_image:     画像一致なら then_scene、不一致なら else_scene を呼ぶ
+- if_image:     画像一致なら then 分岐、不一致なら else 分岐を実行。
+                各分岐は「インライン手順 (then / else: [step dict, ...])」または
+                「シーン呼び出し (then_scene / else_scene: シーン名)」のどちらか。
+                インライン手順が指定されていればそちらを優先し、無ければシーン呼び出しに
+                フォールバックする（旧形式互換）。
 - pick_scene:   scenes リストから random / sequential で 1 シーン選んで呼ぶ
 - keyevent:     Win32 keybd_event でキー入力を送信
 - group_header: 表示用 no-op
@@ -200,6 +204,20 @@ def load_pc_scene(path: str) -> PcScene:
         steps=steps,
         flow_target=bool(data.get("flow_target", True)),
     )
+
+
+def _dict_to_pc_step(d: dict) -> PcStep:
+    """`{"type": "...", ...}` 形式の dict を PcStep に変換する。
+
+    if_image の then/else インライン手順を再生する際に使う。
+    load_pc_scene と異なり旧形式マイグレーションは行わない
+    （インライン手順は新規入力のみの想定）。
+    """
+    if not isinstance(d, dict):
+        return PcStep(type="?", params={})
+    s = dict(d)
+    t = str(s.pop("type", ""))
+    return PcStep(type=t, params=s)
 
 
 def save_pc_scene(scene: PcScene, path: str) -> None:
@@ -494,8 +512,6 @@ def run_pc_scene(
             tmpl_path = str(p.get("template", p.get("path", "")))
             threshold = float(p.get("threshold", 0.85))
             region    = p.get("region")
-            then_name = str(p.get("then_scene", ""))
-            else_name = str(p.get("else_scene", ""))
             log(f"  [{i+1}/{total}] if_image {tmpl_path}")
             if not _check_hwnd(hwnd, log):
                 continue
@@ -512,10 +528,33 @@ def run_pc_scene(
                     _, score = m
                     matched = score >= threshold
                     log(f"    score={score:.3f}  threshold={threshold:.2f}  → {'then' if matched else 'else'}")
-            target_name = then_name if matched else else_name
-            r = _invoke_subscene(target_name, "if_image")
-            if r is False:
-                return False
+
+            branch_label = "then" if matched else "else"
+            inline_steps_raw = p.get(branch_label)
+            scene_name = str(p.get(f"{branch_label}_scene", ""))
+            if inline_steps_raw:
+                # インライン手順を実行（一時シーンを構築して再帰呼出し）
+                if depth + 1 > _MAX_CALL_DEPTH:
+                    log(f"    if_image[{branch_label}]: 階層上限 ({_MAX_CALL_DEPTH}) — スキップ")
+                else:
+                    inline_steps = [_dict_to_pc_step(d) for d in inline_steps_raw]
+                    sub = PcScene(
+                        name=f"{scene.name}#if_image[{i}].{branch_label}",
+                        window_title=scene.window_title,
+                        steps=inline_steps,
+                    )
+                    r = run_pc_scene(
+                        sub, mouse, hwnd, log, should_stop,
+                        step_callback=None,
+                        depth=depth + 1,
+                        _call_stack=_call_stack,
+                    )
+                    if not r:
+                        return False
+            elif scene_name:
+                r = _invoke_subscene(scene_name, "if_image")
+                if r is False:
+                    return False
 
         elif t == "pick_scene":
             scenes = list(p.get("scenes", []) or [])

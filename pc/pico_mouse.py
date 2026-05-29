@@ -40,6 +40,11 @@ _SHORT_MOVE_THRESHOLD_PX = 80
 _SHORT_MOVE_STEP = 5         # max_step (px/event)
 _SHORT_MOVE_DELAY = 0.04     # event 間 sleep (秒)
 
+# 短距離 detour（遠回り）モード。短距離移動が苦手な環境向けに、
+# 一度 target から離れた位置へジャンプしてから長距離アプローチで戻す。
+# 短距離での HID 加速立ち上がり不足や、終端の沈み込みを回避する狙い。
+_SHORT_MOVE_DETOUR_OFFSET_PX = 300
+
 
 def _enable_dpi_awareness() -> None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -102,6 +107,8 @@ class PicoMouse:
 
         self.port = resolved
         self._speed_scale: float = 1.0  # HID 1単位あたりの実移動画素数（calibrate() で測定）
+        # 短距離 click_at で「detour 経由」アプローチを使うか（短距離 HID 精度問題対策）
+        self.short_move_detour: bool = True
         self.ping()  # 疎通確認
 
     def ping(self) -> None:
@@ -142,11 +149,22 @@ class PicoMouse:
         実マウス相当の HID 相対移動なら通る。戻り値は最終カーソル位置。
 
         短距離移動はポインター加速の影響と HID 端数の影響を受けやすいため、
-        ステップを細かく・間隔を広く取って精度優先のパラメータに自動切替する。
+        `short_move_detour=True`（既定）なら target から離れた位置を経由させて
+        必ず「長距離アプローチ」になるようにする。短距離直行モードに戻したい
+        場合はインスタンスで `mouse.short_move_detour = False` を立てる。
         """
         cx, cy = self.get_cursor_pos()
         dist = max(abs(x - cx), abs(y - cy))
-        if dist <= _SHORT_MOVE_THRESHOLD_PX:
+        if dist <= _SHORT_MOVE_THRESHOLD_PX and self.short_move_detour:
+            # detour: target から大きく離れた位置に一旦移動 → 長距離アプローチで target へ
+            # 画面端へ出ないよう、target 座標が大きい側からは引き、小さい側からは加える
+            off = _SHORT_MOVE_DETOUR_OFFSET_PX
+            detour_x = x - off if x > off else x + off
+            detour_y = y - off if y > off else y + off
+            self.move_to_accurate(detour_x, detour_y)
+            fx, fy = self.move_to_accurate(x, y)
+        elif dist <= _SHORT_MOVE_THRESHOLD_PX:
+            # 旧挙動: 短距離直行（detour 無効時のフォールバック）
             fx, fy = self.move_to_accurate(
                 x, y, step=_SHORT_MOVE_STEP, delay=_SHORT_MOVE_DELAY,
             )
